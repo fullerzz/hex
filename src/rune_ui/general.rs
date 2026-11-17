@@ -122,22 +122,19 @@ pub(super) fn basics(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Option<El> {
     );
     let (description, control) = match missing_model(ui) {
         // Hex can't listen without the selected model: say so, with the
-        // download's progress, or Download and Add model file… when none
-        // runs, as after Continue without a model (#894).
+        // check's progress, or Add model file… when none runs, as after
+        // Continue without a model (#894). Hex never downloads a model.
         Some(progress) => {
             let description = match (
                 progress.downloading,
                 super::model_import::download_failure(ui),
             ) {
-                (Some(_), _) => (
-                    tr("Hex can't listen until the speech model has downloaded").to_string(),
-                    p.muted(),
-                ),
+                (Some(_), _) => (tr("Checking…").to_string(), p.muted()),
                 (None, Some(error)) => {
                     (tr_fill("No speech model installed: {}", &error), p.danger())
                 }
                 (None, None) => (
-                    tr("No speech model installed. Download one or add a model file.").to_string(),
+                    tr("No speech model installed. Choose your model file.").to_string(),
                     p.danger(),
                 ),
             };
@@ -150,21 +147,7 @@ pub(super) fn basics(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Option<El> {
                         .key("transcription-progress")
                         .w(120.0),
                 ),
-                None => controls
-                    .child(button(
-                        p,
-                        "transcription-download",
-                        tr("Download"),
-                        ButtonKind::Secondary,
-                        |ui: &mut Ui, _| {
-                            let selection = ui.settings.transcription.clone();
-                            ui.send(Request::ChooseModel {
-                                model: selection.model,
-                                language: selection.language,
-                            });
-                        },
-                    ))
-                    .child(super::model_import::use_file_button(ui, p)),
+                None => controls.child(super::model_import::use_file_button(ui, p)),
             };
             (Some(description), controls.child(picker_button))
         }

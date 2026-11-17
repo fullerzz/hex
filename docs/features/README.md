@@ -99,7 +99,7 @@ Install on Windows                        // setup.windows-installer
 ├── Setup.exe, per user, no admin -> managed versions\<version>\hex.exe
 │   ├── x64 without a Vulkan 1.2 driver -> installs; speech on the CPU + Settings note (#1240)
 │   ├── another version installed (e.g. self-updated) -> install this one over it
-│   └── finish -> Open Hex -> the first run downloads a model
+│   └── finish -> Open Hex -> the first run asks for your model file
 └── Settings › Apps -> uninstall every version, shortcut, Launch at login; keep data
 
 Install on Linux                          // setup.linux-installer
@@ -107,9 +107,9 @@ Install on Linux                          // setup.linux-installer
     ├── cannot start -> name the glibc floor or the missing Arch packages
     └── finish without wl-copy -> print apt/dnf/pacman commands for wl-clipboard and wtype
 
-Prepare local models                      // separate network dependency
-└── Dictation -> huggingface.co and its download CDN
-    └── Transfer fails -> host-specific guidance -> restore access -> Retry
+Prepare local models                      // no network: setup.supplied-only
+└── Dictation -> a GGUF file you supply (Choose your model file…, Add model
+    file…, `hex model import`); Hex never downloads models
 ```
 
 The website shows the pinned macOS version and platform requirements beside its

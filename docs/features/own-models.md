@@ -7,6 +7,55 @@ cache. Both are ordinary features on every OS (they left Labs as
 Catalog models stay the tested path: Hex vouches for nothing in a file it
 didn't pin.
 
+## Supplied Models Only (this fork)
+
+This fork never downloads a speech model. Every model, the speech detector
+included, is a file the person supplies.
+
+```ts
+Any model preparation (Settings, menu bar, onboarding, local API,         // setup.supplied-only
+`hex model use|install`, the Linux and Windows listeners)
+└── transcription::models::ensure_installed -> verify_installed only
+    ├── catalog file in models/ or found in place, or an import -> checked
+    │   against its pin or receipt, then used
+    ├── missing -> "<model> isn't on this computer. Choose your model file:
+    │   Hex doesn't download speech models." Nothing is fetched
+    └── changed or wrong file -> "<model>'s file doesn't match the model Hex
+        expects. Choose another model file." The file stays, unreplaced
+
+net::download (the one HTTPS fetch)                                   // setup.download-boundary
+└── a target in the models folder, or named *.gguf / *.bin anywhere ->
+    refused before any request ("Hex doesn't download speech models.
+    Choose your model file."). The updater's own files are unaffected
+
+Apple Speech (macOS)
+└── a locale whose assets macOS doesn't already have -> fails with the same
+    request; Hex never asks AssetInventory to download them
+
+Speech detector (Silero VAD v6.2)                                     // setup.supplied-detector
+├── used only once `hex model import --speech-detector <file>` copies the
+│   pinned file (size and SHA-256 checked) into models/, or the person puts
+│   it there and it verifies once
+└── missing or wrong -> unused, never fetched; the level-only silence check
+```
+
+Checks: `net::download::tests::a_model_target_is_refused_before_the_network`;
+`transcription::models::tests::a_missing_or_invalid_model_asks_for_a_file_and_never_downloads`
+(missing-file recovery), `an_installed_model_never_fetches_the_speech_detector`,
+`the_speech_detector_comes_only_from_a_supplied_file`;
+`transcription::preparation::tests::switching_to_a_model_not_on_this_computer_asks_for_a_file_and_never_downloads`
+(model switching, installed-only and not);
+`transcription::speech_detector::tests::a_missing_detector_stays_unloaded_and_is_never_downloaded`;
+`desktop::onboarding::tests::the_tour_never_starts_a_model_by_itself` (first
+launch). Each counts every `net::download` call in the process and fails on
+any. Linux-only window checks (not run on macOS):
+`rune_ui::tests::onboarding_asks_for_a_model_file_and_never_downloads`,
+`an_invalid_model_file_names_its_cause_and_asks_for_another`,
+`with_no_model_found_onboarding_asks_for_a_file_with_no_list`, and
+`the_onboarding_model_list_offers_only_files_on_this_computer`. Their goldens
+(onboarding, picker, General) need regenerating on Linux. Not observed: a real
+first run with a supplied file on any OS.
+
 ## Add A Model File
 
 ```ts
@@ -180,28 +229,24 @@ API's `/models` and the SDK's `ModelInfo.source` carry the same field.
 ## Onboarding Choice
 
 ```ts
-Onboarding opens -> scan; its own download waits until it answers  // setup.found-choice
-├── Nothing compatible found -> Setting up Hex, unchanged: the recommended
-│   model downloads by itself, and the model step never shows
-└── Something found -> the first run's model step in place of Setting up Hex:
+Onboarding opens -> scan; nothing starts by itself  // setup.found-choice
+├── Nothing compatible found -> "Choose your model file": the first run holds
+│   there until the person's file is imported and checked, or Continue
+│   without a model (once every permission is ready). Nothing downloads
+└── Something found -> the first run's model step:
     "Choose a speech model", one card of radio rows, no buttons inside
-    ├── Hex's recommended model first, selected, [Recommended] -> "731 MB
-    │   download", or "On this computer" when its exact file (same SHA-256) is
-    │   in the cache (one row, never two)
+    ├── Hex's recommended model first, [Recommended], only when its exact file
+    │   (same SHA-256) is in the cache; it is never offered as a download
     ├── Then each found file -> its name, "On this computer" (a catalog model)
     │   or "On this computer · not tested by Hex"; no hashes, repositories,
     │   revisions, or compression
-    ├── Picking a row starts it: ours downloads ("Downloading… 42%" on the row)
-    │   or, already here, is checked in place; a found file is used where it
-    │   is ("Checking…"). A later pick supersedes one still preparing
+    ├── Picking a row starts it, used where it is ("Checking…"). A later pick
+    │   supersedes one still preparing
     ├── Continue starts the selected row if none was picked, then the story
-    │   moves on once the pick is under way: ours with its download pill on
-    │   top, a found one with no download page or pill at all
+    │   moves on once the pick is under way
     ├── A pick that fails asks again on the list
-    ├── Back on the pages after it returns to the list to change the pick,
-    │   even with the model ready
-    └── The held download is released once the tour passes setup, so a run
-        that skips the step still gets the recommended model
+    └── Back on the pages after it returns to the list to change the pick,
+        even with the model ready
 ```
 
 Observed on apollo (Linux, Radeon 8060S over Vulkan, 2026-11-01) with an
@@ -222,9 +267,9 @@ downloaded, the full check refusing a mismatched file),
 `transcription::gguf_header::tests`, `transcription::custom_models::tests`
 (including `a_relinked_copy_reads_as_changed_and_check_again_accepts_only_the_same_contents`,
 `a_receipt_survives_a_renumbered_volume_but_not_another_file`, and `a_file_added_in_place_is_recorded_by_path_copied_nowhere_and_forgetting_leaves_it`),
-`desktop::onboarding::tests::a_held_download_waits_for_the_person`,
+`desktop::onboarding::tests::the_tour_never_starts_a_model_by_itself`,
 `a_found_model_moves_on_without_a_download_and_back_returns_to_it`,
-`the_onboarding_model_list_starts_the_row_picked_or_the_recommended_one`,
+`the_onboarding_model_list_offers_only_files_on_this_computer`,
 `labs::tests::graduated_features_answer_by_name`, and the goldens
 `rune-picker-custom-models-light`, `rune-picker-found-light`, and
 `rune-onboarding-model-found-light`,
@@ -232,27 +277,8 @@ downloaded, the full check refusing a mismatched file),
 `rune-onboarding-model-found-recommended-light`, and
 `rune-onboarding-model-found-back-light`.
 
-## A Download Another Process Runs
+## Another Process Checking The Same Model
 
-```ts
-models/.download.lock held by `hex model install` (a terminal) or another Hex,
-writing models/<file>.gguf.partial  // transcription::models::lock_downloads
-├── Onboarding, Settings, or `hex model install` starts the same model -> it
-│   waits for that lock instead of failing or downloading a second copy
-├── While it waits, downloaded_bytes comes from the partial file's size, so
-│   `hex status --json`, the picker, and onboarding show that process's
-│   progress rather than 0%
-├── The lock covers the whole models folder, so the progress shown is this
-│   model's partial file; while the other process fetches a different model
-│   it stays flat
-├── Cancel stops only the wait; the other process's download continues
-└── The lock is released -> the finished file is verified against its
-    receipt and adopted, with no second download
-```
-
-Checks: `transcription::models::tests::waiting_for_another_processs_download_reports_its_partial_bytes`
-holds the lock and writes three bytes of the partial, then asserts a waiting
-download reports those bytes and stops canceled without fetching anything.
-That a foreign lock makes `hex model install`/onboarding show it in the real
-service has **not** been run; the Linux app's snapshot was checked by reading
-`linux::app::snapshot`.
+`models/.download.lock` (the name predates this fork) serializes checks of one
+models folder between processes, so two Hex processes never verify and write a
+receipt for the same file at once. Nothing writes a `.partial` file any more.

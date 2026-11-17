@@ -1187,23 +1187,21 @@ impl LinuxDesktopHost {
         let canceled = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(AtomicU64::new(0));
         let stage = Arc::new(AtomicU8::new(
-            crate::transcription::models::ModelPreparationStage::Downloading as u8,
+            crate::transcription::models::ModelPreparationStage::Verifying as u8,
         ));
         let worker_canceled = canceled.clone();
         let worker_progress = progress.clone();
         let worker_stage = stage.clone();
         let worker = std::thread::spawn(move || {
             (|| {
-                if automatic {
-                    crate::transcription::models::verify_installed(definition, &worker_canceled)?;
-                } else {
-                    crate::transcription::models::download_with_stage_progress(
-                        definition,
-                        &worker_canceled,
-                        &worker_progress,
-                        &worker_stage,
-                    )?;
-                }
+                // Automatic or chosen, the model is a file already on this
+                // computer: Hex never downloads one.
+                crate::transcription::models::ensure_installed(
+                    definition,
+                    &worker_canceled,
+                    &worker_progress,
+                    &worker_stage,
+                )?;
                 if worker_canceled.load(Ordering::Relaxed) {
                     return Err(color_eyre::eyre::eyre!("model activation canceled"));
                 }

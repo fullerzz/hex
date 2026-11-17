@@ -1172,12 +1172,7 @@ fn stream_model_prepare(
             model.runtime,
             crate::transcription::models::ModelRuntime::Gguf(_)
         ) {
-            crate::transcription::models::download_with_stage_progress(
-                model,
-                &canceled,
-                &downloaded,
-                &stage,
-            )?;
+            crate::transcription::models::ensure_installed(model, &canceled, &downloaded, &stage)?;
         }
         if canceled.load(Ordering::Acquire) {
             bail!("model preparation canceled");

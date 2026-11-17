@@ -1,6 +1,11 @@
 //! Resumable downloads into a `.partial` file: one ranged request per piece,
 //! so a stalled connection fails within a bounded time instead of hanging,
 //! and every piece resumes where the file ends. HTTPS only.
+//!
+//! This fork never downloads speech models: every model, the speech detector
+//! included, is a file the person supplies. `download` refuses any target in
+//! the models folder or named like a model before it touches the network, so
+//! a model fetch added anywhere fails here instead of reaching the internet.
 
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -33,6 +38,12 @@ pub fn download(
     partial: &Path,
     mut progress: impl FnMut(u64),
 ) -> Result<()> {
+    #[cfg(test)]
+    CALLS.fetch_add(1, Ordering::SeqCst);
+    if is_model_file(partial) {
+        tracing::warn!(path = %partial.display(), host = %super::host(download.url), "refused a speech model download");
+        bail!("{MODEL_DOWNLOADS_REFUSED}");
+    }
     let canceled = || {
         download
             .canceled
@@ -70,6 +81,34 @@ pub fn download(
             }
         }
     }
+}
+
+/// Why `download` refused: models come only from files the person chooses.
+const MODEL_DOWNLOADS_REFUSED: &str = "Hex doesn't download speech models. Choose your model file.";
+
+/// Whether `partial` would land in the models folder or is named like a
+/// model (`.gguf`, `.bin`), wherever it is.
+fn is_model_file(partial: &Path) -> bool {
+    let in_models = |directory: color_eyre::Result<std::path::PathBuf>| {
+        directory.is_ok_and(|directory| partial.starts_with(directory))
+    };
+    let name = partial
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    in_models(crate::transcription::models::models_dir())
+        || in_models(crate::app_paths::models_dir())
+        || [".gguf", ".bin"].iter().any(|model| name.contains(model))
+}
+
+/// Every `download` call this process made, refused ones included, so model
+/// tests fail when any model flow reaches the network boundary.
+#[cfg(test)]
+static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn attempts_for_test() -> usize {
+    CALLS.load(Ordering::SeqCst)
 }
 
 enum Piece {
@@ -174,4 +213,48 @@ fn piece(
         return Ok(Piece::Done);
     }
     Ok(Piece::More(final_url))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_model_target_is_refused_before_the_network() {
+        let models = std::env::temp_dir().join(format!("hex-net-models-{}", std::process::id()));
+        std::fs::create_dir_all(&models).unwrap();
+        crate::transcription::models::set_test_models_dir(Some(models.clone()));
+        let attempts = attempts_for_test();
+        let request = |partial: &Path| {
+            download(
+                &Download {
+                    // Never resolvable: a request that got through would fail
+                    // differently.
+                    url: "https://invalid.invalid/model",
+                    user_agent: "hex/test",
+                    size: Some(5),
+                    canceled: None,
+                },
+                partial,
+                |_| {},
+            )
+        };
+        for partial in [
+            models.join("anything.partial"),
+            std::env::temp_dir().join("elsewhere.gguf.partial"),
+            std::env::temp_dir().join("ggml-model.bin.partial"),
+        ] {
+            let error = request(&partial).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                MODEL_DOWNLOADS_REFUSED,
+                "{}",
+                partial.display()
+            );
+            assert!(!partial.exists());
+        }
+        crate::transcription::models::set_test_models_dir(None);
+        let _ = std::fs::remove_dir_all(models);
+        assert_eq!(attempts_for_test(), attempts + 3);
+    }
 }

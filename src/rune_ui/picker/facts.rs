@@ -407,56 +407,44 @@ pub(super) fn progress_line(p: Paint, entry: &Entry) -> El {
     line.child(cancel_button(p))
 }
 
-/// Use or Download for a model that can be chosen, at the button size of
-/// the compare columns.
+/// Use for a model on this computer, at the button size of the compare
+/// columns. A catalog model that isn't here offers "Use a model file…"
+/// instead: Hex never downloads models.
 pub(super) fn choose_button(p: Paint, entry: &Entry, primary: bool) -> El {
     let def = entry.def;
-    let label = if downloads(entry) {
-        tr_fill("Download {}", &def.size_label())
+    let kind = if primary {
+        ButtonKind::Primary
     } else {
-        tr("Use").into()
+        ButtonKind::Secondary
     };
-    button(
-        p,
-        "choose-model",
-        &label,
-        if primary {
-            ButtonKind::Primary
-        } else {
-            ButtonKind::Secondary
-        },
-        move |ui: &mut Ui, _| choose(ui, def),
-    )
+    if downloads(entry) {
+        return button(
+            p,
+            "choose-model-file",
+            tr("Use a model file…"),
+            kind,
+            |ui: &mut Ui, _| crate::rune_ui::model_import::use_file(ui),
+        );
+    }
+    button(p, "choose-model", tr("Use"), kind, move |ui: &mut Ui, _| {
+        choose(ui, def)
+    })
 }
 
-/// The list's quieter Use or download action, at row size.
+/// The list's quieter Use, or "Use a model file…" for a catalog model that
+/// isn't on this computer, at row size.
 pub(super) fn row_choose_button(p: Paint, entry: &Entry) -> El {
     let def = entry.def;
-    if !downloads(entry) {
-        return Button::new(tr("Use"))
+    if downloads(entry) {
+        return Button::new(tr("Use a model file…"))
             .variant(ButtonVariant::Neutral)
-            .on_press_tx(move |ui: &mut Ui, _| choose(ui, def))
+            .on_press_tx(|ui: &mut Ui, _| crate::rune_ui::model_import::use_file(ui))
             .build_small_push(p.k)
-            .key("choose-model");
+            .key("choose-model-file");
     }
-    let size = def.size_label();
-    Button::new(tr_fill("Download {}", &size))
-        .variant(ButtonVariant::Ghost)
-        .label_with(move |font, ink| {
-            row()
-                .gap(4.0)
-                .center_y()
-                .child(
-                    rune::icon(&rune_theme_opencode::icons::ARROW_UP, 14.0)
-                        .key("download-glyph")
-                        .color(ink)
-                        .rotate(std::f32::consts::PI),
-                )
-                .child(text(size).key("label").font(tnum(font)).color(ink))
-        })
+    Button::new(tr("Use"))
+        .variant(ButtonVariant::Neutral)
         .on_press_tx(move |ui: &mut Ui, _| choose(ui, def))
         .build_small_push(p.k)
         .key("choose-model")
-        // A ghost's label lines up with the row's other right edges.
-        .mr(-9.0)
 }

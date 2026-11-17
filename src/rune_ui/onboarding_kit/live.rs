@@ -50,7 +50,10 @@ pub(crate) struct Live {
     /// The listener runs but its model, microphone, and shortcuts aren't up
     /// yet, so the practice waits instead of inviting a hold.
     pub(crate) warming: bool,
-    /// The model download stopped with an error.
+    /// No model is on this computer and none is being added or checked: the
+    /// person chooses their model file. Hex never downloads one.
+    pub(crate) needs_file: bool,
+    /// Preparing the chosen model stopped with an error.
     pub(crate) failed: bool,
     /// Why, in one line, such as a proxy or certificate (#894).
     pub(crate) failure: Option<String>,
@@ -126,6 +129,8 @@ impl Live {
     /// The story waits on the download page for the model step.
     pub(crate) fn holds(&self) -> bool {
         self.scanning
+            || self.needs_file
+            || self.using_file
             || match self.model_step {
                 ModelStep::None => false,
                 ModelStep::Choosing => true,
@@ -149,10 +154,10 @@ struct Checked {
 }
 
 impl Live {
-    /// The model can't be had here: its download failed or stalled, so
-    /// Continue without a model is offered (#894).
+    /// There is no model to use yet: none was chosen, or the chosen one
+    /// failed or stalled, so Continue without a model is offered (#894).
     pub(crate) fn model_blocked(&self) -> bool {
-        self.failed || self.stalled
+        self.needs_file || self.failed || self.stalled
     }
 
     pub(crate) fn granted_for(&self, now: f64) -> bool {
@@ -322,6 +327,7 @@ pub(in crate::rune_ui) fn open(ui: &mut Ui) {
     s.live = Some(Live {
         listening: false,
         warming: false,
+        needs_file: false,
         failed: false,
         failure: None,
         stalled: false,
@@ -499,11 +505,12 @@ pub(in crate::rune_ui) fn poll(ui: &mut Ui, tx: &mut Tx) -> bool {
     };
     let model = transcription_models::validate(&choice).ok();
     let warming = ui.view.as_ref().is_some_and(|view| view.listener.warming);
-    let (preparing, downloaded_bytes, errored) =
-        ui.view.as_ref().map_or((false, 0, false), |view| {
+    let (preparing, preparing_any, downloaded_bytes, errored) =
+        ui.view.as_ref().map_or((false, false, 0, false), |view| {
             let t = &view.transcription;
             (
                 model.is_some_and(|m| t.preparing == Some(m.id)),
+                t.preparing.is_some(),
                 t.downloaded_bytes,
                 t.error.is_some(),
             )
@@ -622,7 +629,9 @@ pub(in crate::rune_ui) fn poll(ui: &mut Ui, tx: &mut Tx) -> bool {
     }
     live.listening = live.practice == Practice::Listening;
 
-    // The model download.
+    // The person's model: nothing downloads, so without one on this computer
+    // the page asks for their file.
+    live.needs_file = !choice_installed && !preparing_any && !using_file;
     live.failed = !choice_installed && !preparing && (errored || failure.is_some());
     live.progress = (preparing && !choice_installed).then_some(match live.progress {
         Some((bytes, since)) if bytes == downloaded_bytes => (bytes, since),
@@ -713,9 +722,9 @@ pub(in crate::rune_ui) fn skip(ui: &mut Ui) {
     }
 }
 
-/// "Continue without a model", once the download failed or stalled (#894):
-/// onboarding finishes with no model, and Settings says so with Download
-/// and Add model file…. Only offered once every permission is ready.
+/// "Continue without a model", while no model is ready (#894): onboarding
+/// finishes with no model, and Settings says so with Add model file…. Only
+/// offered once every permission is ready.
 pub(in crate::rune_ui) fn continue_without_model(ui: &mut Ui) {
     let offered = ui
         .first_run
@@ -824,26 +833,11 @@ pub(super) fn recovery(p: Paint) -> El {
         )
 }
 
-/// "Use a model file…" when the download is blocked: a GGUF chosen here is
-/// imported and selected, and the first run moves on once it is ready.
+/// "Choose your model file…": a GGUF chosen here is imported and selected,
+/// and the first run moves on once it is ready. It is the only way the
+/// first run gets a model; Hex never downloads one.
 pub(super) fn use_file(ui: &mut Ui) {
     super::super::model_import::use_file(ui);
-}
-
-/// "Try again": retries the model the person picked from the list, else the
-/// language capsule's choice.
-pub(super) fn retry_download(ui: &mut Ui) {
-    let Some(live) = ui.first_run.as_mut().and_then(|s| s.live.as_mut()) else {
-        return;
-    };
-    live.failed = false;
-    live.stalled = false;
-    live.progress = None;
-    let choice = live.choice.clone();
-    match ui.found.picked {
-        Some(index) => found_choice::pick(ui, index),
-        None => choose(ui, &choice),
-    }
 }
 
 /// Allow on a permission row.

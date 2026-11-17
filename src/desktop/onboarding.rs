@@ -107,8 +107,9 @@ pub fn permission_warnings(status: SetupStatus) -> Vec<PermissionWarning> {
 }
 
 /// The first-run tour, in order. `Setup` holds every permission on one
-/// screen; `TryIt` is a practice dictation into a field in the window. The
-/// speech model downloads in the background from the moment the tour opens.
+/// screen; `TryIt` is a practice dictation into a field in the window. Hex
+/// never downloads the speech model: the tour waits for the person to choose
+/// their model file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Step {
     Welcome,
@@ -214,7 +215,9 @@ pub enum Effect {
     /// Clear stale TCC entries for this permission and reopen the prompt and
     /// guide.
     ResetPermission(PermissionKind),
-    DownloadModel,
+    /// Prepare the model the person chose (a file on this computer). The tour
+    /// never asks for it by itself, and preparing never downloads.
+    PrepareModel,
     /// Every permission just turned on: move to the next step after a beat,
     /// so the last check is seen.
     AdvanceSoon,
@@ -242,8 +245,8 @@ pub struct View {
     /// Dictation can run: permissions and the model are ready.
     pub dictation_ready: bool,
     pub model: ItemStatus,
-    /// The tour downloaded the model, so its progress is worth showing
-    /// outside the setup rows.
+    /// The person started a model, so its progress is worth showing outside
+    /// the setup rows.
     pub show_download: bool,
     pub practice: Practice,
     /// The listener needs a restart Hex will not do by itself again.
@@ -269,10 +272,8 @@ pub struct Flow {
     /// A refused microphone's System Settings guide is up.
     microphone_guide: bool,
     practice: Practice,
-    download_requested: bool,
-    /// The recommended model waits for the person: a scan for models already
-    /// on this computer is running, or found one and they choose.
-    download_held: bool,
+    /// The person chose a model; the tour never starts one by itself.
+    model_requested: bool,
     advance_due: bool,
     reopen: bool,
     relaunching: bool,
@@ -296,8 +297,7 @@ impl Flow {
             accessibility_stale: false,
             microphone_guide: false,
             practice: Practice::Waiting,
-            download_requested: false,
-            download_held: false,
+            model_requested: false,
             advance_due: false,
             reopen: false,
             relaunching: false,
@@ -311,12 +311,6 @@ impl Flow {
             flow.forward_from(start)
         };
         flow
-    }
-
-    /// Holds (or releases) the download the tour starts by itself, while the
-    /// person can choose a model already on this computer instead.
-    pub fn hold_download(&mut self, held: bool) {
-        self.download_held = held;
     }
 
     pub fn step(&self) -> Step {
@@ -367,7 +361,7 @@ impl Flow {
             ready: self.setup_ready(),
             dictation_ready: self.status.ready(),
             model: self.model_status(),
-            show_download: self.download_requested && !self.model_in_setup(),
+            show_download: self.model_requested && !self.model_in_setup(),
             practice: self.practice,
             reopen: self.reopen,
             restart: self.restart_needed(),
@@ -387,7 +381,7 @@ impl Flow {
     }
 
     /// Where the practice step can wait for the model, the model is not a
-    /// setup row: it downloads behind the permissions.
+    /// setup row: the person chooses it beside the permissions.
     fn model_in_setup(&self) -> bool {
         !self.permissions || !self.practice_step
     }
@@ -408,7 +402,7 @@ impl Flow {
             ItemStatus::Downloading(progress)
         } else if self.model.failed {
             ItemStatus::Failed
-        } else if self.download_requested {
+        } else if self.model_requested {
             ItemStatus::Downloading(0.0)
         } else {
             ItemStatus::Todo
@@ -434,17 +428,6 @@ impl Flow {
         self.model = model;
         if self.step == Step::Setup && !was_ready && self.setup_ready() {
             self.advance_due = true;
-        }
-        // The download starts the first time the tour sees no model, before
-        // any permission is asked, so it runs while the person reads.
-        if !status.transcription_model
-            && model.downloading.is_none()
-            && !model.failed
-            && !self.download_requested
-            && !self.download_held
-        {
-            self.download_requested = true;
-            return Effect::DownloadModel;
         }
         if std::mem::take(&mut self.advance_due) && self.step == Step::Setup {
             return Effect::AdvanceSoon;
@@ -536,14 +519,14 @@ impl Flow {
 
     fn grant(&mut self, item: SetupItem) -> Effect {
         match item {
-            // The model can be retried from any step: its progress follows
-            // the whole tour.
+            // The person's model can be chosen again from any step: its
+            // progress follows the whole tour.
             SetupItem::Model
                 if !self.status.transcription_model && self.model.downloading.is_none() =>
             {
                 self.model.failed = false;
-                self.download_requested = true;
-                Effect::DownloadModel
+                self.model_requested = true;
+                Effect::PrepareModel
             }
             _ if self.step != Step::Setup => Effect::None,
             SetupItem::Microphone => {
@@ -1662,69 +1645,44 @@ mod tests {
         assert_eq!(flow.on(Input::Continue), Effect::Finish);
     }
 
+    /// First launch: with no model on this computer the tour never asks
+    /// for one by itself, on any step; only the person's choice prepares it.
     #[test]
-    fn the_model_downloads_as_soon_as_the_tour_opens() {
-        let mut flow = Flow::new(Step::Welcome, fresh_status(), true, true);
-        assert_eq!(flow.view().model, ItemStatus::Todo);
-        assert_eq!(
-            flow.on(Input::Status(fresh_status(), ModelProgress::default())),
-            Effect::DownloadModel,
-            "on the welcome screen, before any permission"
-        );
-        assert_eq!(flow.step(), Step::Welcome);
-        assert!(flow.view().show_download);
-        assert_eq!(
-            flow.view().model,
-            ItemStatus::Downloading(0.0),
-            "progress shows before the first byte"
-        );
-        assert_eq!(
-            flow.on(Input::Status(fresh_status(), ModelProgress::default())),
-            Effect::None,
-            "asked once"
-        );
-        flow.on(Input::Status(fresh_status(), downloading(0.3)));
-        assert_eq!(flow.view().model, ItemStatus::Downloading(0.3));
-
-        let installed_flow = {
-            let mut flow = Flow::new(Step::Welcome, ready_status(), true, true);
+    fn the_tour_never_starts_a_model_by_itself() {
+        for (permissions, practice) in [(true, true), (false, false), (true, false)] {
+            let mut flow = Flow::new(Step::Welcome, fresh_status(), permissions, practice);
+            for _ in 0..3 {
+                assert_eq!(
+                    flow.on(Input::Status(fresh_status(), ModelProgress::default())),
+                    Effect::None,
+                    "nothing starts while the person reads"
+                );
+            }
+            flow.on(Input::Continue);
             assert_eq!(
-                flow.on(Input::Status(ready_status(), installed())),
-                Effect::None
+                flow.on(Input::Status(fresh_status(), ModelProgress::default())),
+                Effect::None,
+                "nor at setup"
             );
-            flow
-        };
+            assert_eq!(flow.view().model, ItemStatus::Todo);
+            assert!(!flow.view().show_download);
+            assert_eq!(
+                flow.on(Input::Grant(SetupItem::Model)),
+                Effect::PrepareModel,
+                "choosing a file prepares it"
+            );
+            assert_eq!(flow.view().model, ItemStatus::Downloading(0.0));
+        }
+        let mut installed_flow = Flow::new(Step::Welcome, ready_status(), true, true);
+        assert_eq!(
+            installed_flow.on(Input::Status(ready_status(), installed())),
+            Effect::None
+        );
         assert!(!installed_flow.view().show_download);
     }
 
     #[test]
-    fn a_held_download_waits_for_the_person() {
-        let mut flow = Flow::new(Step::Welcome, fresh_status(), true, true);
-        flow.hold_download(true);
-        assert_eq!(
-            flow.on(Input::Status(fresh_status(), ModelProgress::default())),
-            Effect::None,
-            "found models are offered first"
-        );
-        assert_eq!(flow.view().model, ItemStatus::Todo);
-        assert_eq!(
-            flow.on(Input::Grant(SetupItem::Model)),
-            Effect::DownloadModel,
-            "choosing still starts it"
-        );
-        let mut released = Flow::new(Step::Welcome, fresh_status(), true, true);
-        released.hold_download(true);
-        released.on(Input::Status(fresh_status(), ModelProgress::default()));
-        released.hold_download(false);
-        assert_eq!(
-            released.on(Input::Status(fresh_status(), ModelProgress::default())),
-            Effect::DownloadModel,
-            "nothing found: the tour downloads as before"
-        );
-    }
-
-    #[test]
-    fn a_failed_download_retries_from_any_step() {
+    fn a_failed_model_can_be_chosen_again_from_any_step() {
         let mut flow = Flow::new(Step::Welcome, fresh_status(), true, true);
         flow.on(Input::Status(fresh_status(), ModelProgress::default()));
         let failed = ModelProgress {
@@ -1735,14 +1693,14 @@ mod tests {
         assert_eq!(flow.view().model, ItemStatus::Failed);
         assert_eq!(
             flow.on(Input::Grant(SetupItem::Model)),
-            Effect::DownloadModel,
-            "retry on the welcome screen"
+            Effect::PrepareModel,
+            "chosen again on the welcome screen"
         );
         flow.on(Input::Status(fresh_status(), downloading(0.1)));
         assert_eq!(
             flow.on(Input::Grant(SetupItem::Model)),
             Effect::None,
-            "a running download is not restarted"
+            "a model being prepared is not restarted"
         );
     }
 
@@ -1878,7 +1836,12 @@ mod tests {
         );
         assert_eq!(
             flow.on(Input::Status(status, ModelProgress::default())),
-            Effect::DownloadModel
+            Effect::None,
+            "the model waits for the person's file"
+        );
+        assert_eq!(
+            flow.on(Input::Grant(SetupItem::Model)),
+            Effect::PrepareModel
         );
         assert!(
             !flow.view().show_download,

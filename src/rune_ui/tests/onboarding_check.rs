@@ -12,10 +12,11 @@ use crate::desktop::onboarding::Step;
 /// Windows. An intentional change refreshes these goldens in the same PR
 /// (`HEX_UPDATE_GOLDENS=1`).
 pub(super) const SCENES: &[&str] = &[
-    // A fresh install: setting up Hex, the recommended model downloading.
+    // A fresh install: Hex asks for the person's model file.
     "onboarding",
     "mac-onboarding",
-    // The download stopped; Continue without a model, then Settings.
+    // The chosen file couldn't be used; Continue without a model, then
+    // Settings.
     "onboarding-download-failed",
     "onboarding-no-model",
     // The model step: models on this computer; the recommended one among
@@ -110,17 +111,17 @@ fn onboarding_skip() {
     }
 }
 
-/// Continue without a model (#894): only on the download step, only once
-/// the download failed or stalled. It finishes onboarding, and Settings ›
-/// General then says no model is installed, with Download and Add model
-/// file….
+/// Continue without a model (#894): only on the model step, while no model
+/// is ready (none chosen, or the chosen one failed or stalled) and every
+/// permission is. It finishes onboarding, and Settings › General then says
+/// no model is installed, with Add model file… and no download.
 #[test]
 fn onboarding_continue_without_model() {
     for scene in SCENES {
         let rt = runtime(scene, true, PANE_SIZE);
         assert_eq!(
             rt.find("continue-without-model").is_some(),
-            *scene == "onboarding-download-failed",
+            ["onboarding", "onboarding-download-failed"].contains(scene),
             "{scene}: Continue without a model"
         );
     }
@@ -135,7 +136,7 @@ fn onboarding_continue_without_model() {
         "{:?}",
         texts(&rt)
     );
-    assert!(rt.find("transcription-download").is_some(), "Download");
+    assert!(rt.find("transcription-download").is_none(), "no Download");
     assert!(
         rt.find("transcription-add-file").is_some(),
         "Add model file…"
@@ -278,14 +279,15 @@ fn onboarding_goldens() {
 /// A first run on Linux or Windows, in the clean data folder
 /// `HEX_APPLICATION_SUPPORT_DIR` names (no settings, no models, an empty
 /// Hugging Face cache): the real settings load, the real decision to open
-/// onboarding, the real download and verification of the model it picks,
-/// and every page to Hex is ready. Downloads the recommended model, so only
-/// scripts/check-onboarding.sh runs it. The window here is a fixture, not
-/// connected to a service: the test does the service's download itself,
-/// plays the story on its own clock, and nothing writes the completion
-/// marker.
+/// onboarding, the request for the person's model file with nothing started
+/// or downloaded, the real import and verification of the file they choose
+/// (`HEX_ONBOARDING_MODEL_FILE`), and every page to Hex is ready. Needs a
+/// real GGUF speech model, so only scripts/check-onboarding.sh runs it. The
+/// window here is a fixture, not connected to a service: the test does the
+/// import itself, plays the story on its own clock, and nothing writes the
+/// completion marker.
 #[test]
-#[ignore = "downloads a speech model; run by scripts/check-onboarding.sh"]
+#[ignore = "needs HEX_ONBOARDING_MODEL_FILE; run by scripts/check-onboarding.sh"]
 fn onboarding_walkthrough() {
     let support = crate::app_paths::support_dir().unwrap();
     assert!(
@@ -325,41 +327,54 @@ fn onboarding_walkthrough() {
     assert!(ui.first_run.is_some(), "the first run shows");
     let mut rt = runtime_for(ui, true, PANE_SIZE);
     let step = |rt: &Runtime<Ui>| rt.state.tour.as_ref().map(|tour| tour.flow.step());
+    let attempts = crate::net::attempts_for_test();
     let shown = texts(&rt);
-    assert!(shown.contains(&"Setting up Hex".to_owned()), "{shown:?}");
+    assert!(
+        shown.contains(&"Choose your model file".to_owned()),
+        "{shown:?}"
+    );
     assert!(
         !shown.contains(&"Choose a speech model".to_owned()),
         "nothing found, so no model step"
     );
 
-    // Setting up Hex asks the service for the recommended model at once.
+    // Setting up Hex starts nothing: it waits for the person's file.
     assert_eq!(step(&rt), Some(Step::Setup));
-    let (model, language) = match sent(&rt) {
-        [Request::ChooseModel { model, language }] => (*model, language.clone()),
-        other => panic!("setup should choose a model, sent {other:?}"),
-    };
-    assert_eq!(model, rt.state.settings.transcription.model);
+    assert!(
+        sent(&rt).is_empty(),
+        "nothing starts by itself: {:?}",
+        sent(&rt)
+    );
 
-    // The service's work, for real: download and verify into the clean folder.
-    let definition = crate::transcription::models::definition(model);
-    let downloaded = std::sync::atomic::AtomicU64::new(0);
-    let path = crate::transcription::models::download_with_progress(
+    // The person's file, for real: imported and verified into the clean
+    // folder, as Choose your model file… does.
+    let file = std::env::var_os("HEX_ONBOARDING_MODEL_FILE")
+        .expect("set HEX_ONBOARDING_MODEL_FILE to a GGUF speech model");
+    let id = crate::transcription::custom_models::import(
+        std::path::Path::new(&file),
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap_or_else(|error| panic!("importing {file:?} failed: {error:#}"));
+    let definition = crate::transcription::custom_models::definition(id);
+    let model = TranscriptionModelId::Custom(id);
+    let path = crate::transcription::models::verify_installed(
         definition,
         &std::sync::atomic::AtomicBool::new(false),
-        &downloaded,
     )
-    .unwrap_or_else(|error| panic!("downloading {} failed: {error:#}", definition.name));
+    .unwrap_or_else(|error| panic!("checking {} failed: {error:#}", definition.name));
     assert!(
         path.starts_with(&support),
         "{} is outside the data folder",
         path.display()
     );
+    let language = definition.language_for("en").to_owned();
     rt.state.settings.transcription = TranscriptionSelection { model, language };
     assert!(installed(&rt.state), "{} is installed", definition.name);
-    assert!(
-        crate::transcription::models::is_verified(definition),
-        "{} is verified against its pin",
-        definition.name
+    assert_eq!(
+        crate::net::attempts_for_test(),
+        attempts,
+        "no download was attempted"
     );
     rt.state.picker.installed = Some(vec![model]);
 
@@ -377,9 +392,8 @@ fn onboarding_walkthrough() {
     assert!(rt.state.tour.is_none(), "Start using Hex closes onboarding");
     assert!(rt.state.first_run.is_none());
     println!(
-        "onboarding walkthrough: Setting up Hex -> {} downloaded ({} bytes) -> Your turn -> Hex is ready",
+        "onboarding walkthrough: Choose your model file -> {} imported, nothing downloaded -> Your turn -> Hex is ready",
         definition.name,
-        downloaded.load(std::sync::atomic::Ordering::Relaxed)
     );
 }
 

@@ -32,13 +32,10 @@ struct Request {
 }
 
 impl Request {
-    /// The worker's first stage: an installed-only request never downloads.
+    /// The worker's first stage: no request downloads, so every one starts
+    /// by checking the file on disk.
     fn first_stage(&self) -> ModelPreparationStage {
-        if self.installed_only {
-            ModelPreparationStage::Verifying
-        } else {
-            ModelPreparationStage::Downloading
-        }
+        ModelPreparationStage::Verifying
     }
 }
 
@@ -188,9 +185,12 @@ impl Drop for State {
     }
 }
 
+/// Installed-only or not, a model is only ever a file already on this
+/// computer: a missing or invalid one fails with a request to choose a file,
+/// and nothing is downloaded (`models::ensure_installed`).
 fn prepare_selection(
     selection: &TranscriptionSelection,
-    installed_only: bool,
+    _installed_only: bool,
     canceled: &AtomicBool,
     progress: &AtomicU64,
     stage: &AtomicU8,
@@ -204,15 +204,7 @@ fn prepare_selection(
     (|| -> color_eyre::Result<()> {
         let model = crate::transcription::models::validate(selection)?;
         if matches!(model.runtime, ModelRuntime::Gguf(_)) {
-            if installed_only {
-                ModelPreparationStage::Verifying.store(stage);
-                crate::transcription::models::verify_installed(model, canceled)?;
-                progress.store(model.download_bytes().unwrap_or(0), Ordering::Relaxed);
-            } else {
-                crate::transcription::models::download_with_stage_progress(
-                    model, canceled, progress, stage,
-                )?;
-            }
+            crate::transcription::models::ensure_installed(model, canceled, progress, stage)?;
         }
         check_canceled()?;
         ModelPreparationStage::Loading.store(stage);
@@ -330,11 +322,12 @@ mod tests {
             preparation.status().stage,
             Some(ModelPreparationStage::Loading)
         );
-        // A download waiting behind it starts by downloading.
+        // A choice waiting behind it starts by checking its file too:
+        // nothing downloads.
         preparation.start(selection(TranscriptionModelId::ParakeetV3), false);
         assert_eq!(
             preparation.status().stage,
-            Some(ModelPreparationStage::Downloading)
+            Some(ModelPreparationStage::Verifying)
         );
         preparation.cancel();
         assert_eq!(preparation.status().stage, None);
@@ -398,6 +391,52 @@ mod tests {
         assert_eq!(
             completion(&preparation).unwrap().model,
             TranscriptionModelId::ParakeetV2
+        );
+    }
+
+    /// Model switching: choosing a catalog model that isn't on this computer,
+    /// from Settings (a download in upstream Hex) or the menu bar
+    /// (installed-only), asks for a model file and never downloads.
+    #[test]
+    fn switching_to_a_model_not_on_this_computer_asks_for_a_file_and_never_downloads() {
+        let models =
+            std::env::temp_dir().join(format!("hex-preparation-switch-{}", std::process::id()));
+        std::fs::create_dir_all(&models).unwrap();
+        crate::transcription::models::set_test_models_dir(Some(models.clone()));
+        let attempts = crate::net::attempts_for_test();
+        let results: Vec<_> = [false, true]
+            .into_iter()
+            .flat_map(|installed_only| {
+                [
+                    TranscriptionModelId::ParakeetUnifiedEnglish,
+                    TranscriptionModelId::ParakeetV3,
+                ]
+                .map(|model| {
+                    let stage = AtomicU8::new(0);
+                    let result = prepare_selection(
+                        &selection(model),
+                        installed_only,
+                        &AtomicBool::new(false),
+                        &AtomicU64::new(0),
+                        &stage,
+                    );
+                    (result, stage.load(Ordering::Relaxed))
+                })
+            })
+            .collect();
+        let left = std::fs::read_dir(&models).unwrap().count();
+        crate::transcription::models::set_test_models_dir(None);
+        std::fs::remove_dir_all(&models).unwrap();
+        for (result, stage) in results {
+            let error = result.unwrap_err();
+            assert!(error.contains("Choose your model file"), "{error}");
+            assert_ne!(stage, ModelPreparationStage::Downloading as u8);
+        }
+        assert_eq!(left, 0, "nothing was written to the models folder");
+        assert_eq!(
+            crate::net::attempts_for_test(),
+            attempts,
+            "no download was attempted"
         );
     }
 }

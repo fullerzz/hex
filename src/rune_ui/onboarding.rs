@@ -89,17 +89,11 @@ pub(super) fn progress(ui: &Ui) -> (bool, ModelProgress) {
 /// Feeds the flow fresh permission and model state; true when the tour
 /// changed.
 pub(super) fn poll(ui: &mut Ui) -> bool {
-    // Onboarding looks for models already on this computer once, and holds
-    // its own download until the scan answers; with one found, the model
-    // list (`found_choice`) starts the row the person picks.
+    // Onboarding looks for models already on this computer once; with one
+    // found, the model list (`found_choice`) starts the row the person picks.
+    // Nothing downloads: without one, the person chooses their model file.
     if ui.tour.is_some() {
         super::found::scan_for_setup(ui);
-        // Only until setup: past it, the recommended model downloads.
-        let held = (ui.found.scanning() || !ui.found.models.is_empty())
-            && ui
-                .tour
-                .as_ref()
-                .is_some_and(|tour| matches!(tour.flow.step(), Step::Welcome | Step::Setup));
         let choosing = super::found_choice::offered(
             ui,
             ui.tour
@@ -108,9 +102,6 @@ pub(super) fn poll(ui: &mut Ui) -> bool {
         );
         if choosing && ui.found.recommended.is_none() {
             ui.found.recommended = Some(ui.settings.transcription.clone());
-        }
-        if let Some(tour) = &mut ui.tour {
-            tour.flow.hold_download(held);
         }
     }
     let (installed, model) = progress(ui);
@@ -169,8 +160,9 @@ fn remember_step(ui: &Ui, before: Step) {
 
 fn apply(ui: &mut Ui, effect: Effect) {
     match effect {
-        Effect::DownloadModel => {
-            // The model onboarding's choice picked, else the recommended one.
+        Effect::PrepareModel => {
+            // The model onboarding's choice picked, else the saved selection:
+            // both are files on this computer, checked and never downloaded.
             let selection = ui
                 .found
                 .choice
@@ -226,7 +218,6 @@ pub(super) fn fixture(ui: &mut Ui, step: Step, downloading: bool) {
         ui.platform.caps.permissions,
         ui.platform.caps.practice_dictation,
     );
-    flow.hold_download(!ui.found.models.is_empty());
     if step != Step::Welcome {
         flow.on(Input::Continue);
     }
@@ -304,7 +295,6 @@ pub(super) fn mac_fixture(ui: &mut Ui, state: MacStep) {
     ui.platform.permissions = fresh;
     ui.picker.installed = Some(Vec::new());
     ui.tour = Some(Tour::new(Flow::new(Step::Welcome, fresh, true, true)));
-    // The tour starts the download as soon as it sees no model.
     poll(ui);
     input(ui, Input::Continue);
     if state == MacStep::SetupStale {

@@ -2002,12 +2002,11 @@ its room) while discarding a constant floor, scattered clicks, digital silence,
 or a DC offset. Such a relative-path clip also needs the Silero speech detector
 ([transcription/speech_detector.rs](../../src/transcription/speech_detector.rs))
 to confirm speech, and is discarded when it finds none. The detector (1.2 MB,
-pinned revision and checksum in [transcription/models.rs](../../src/transcription/models.rs))
-downloads in the background whenever a transcription model is downloaded or
-activated, and at the first dictation, so an installed model still activates at
-once offline; a failed download is retried at the next dictation. Model
-preparation (macOS, Windows) and the Linux listener load it when present and
-never download it. It runs on the CPU with a speech threshold of 0.4 instead of
+pinned checksum in [transcription/models.rs](../../src/transcription/models.rs))
+is never downloaded: it runs only once the person supplies the pinned file
+(`hex model import --speech-detector <file>`, or placed in the models folder
+and verified once; see [supplied models](own-models.md#supplied-models-only-this-fork)).
+Model preparation and the listeners load it when present. It runs on the CPU with a speech threshold of 0.4 instead of
 Silero's 0.5, which misses a whisper at -43 dBFS. While it is missing or fails to
 load, a quiet relative-path clip is discarded as before, so only captures at or
 above the fixed threshold reach the model without one.
@@ -2027,8 +2026,9 @@ one quiet window bridged per gap), and
 with the detector's verdict fixed; `real_detector_rejects_silence_and_noise`,
 `real_detector_hears_speech`, and `real_detector_hears_quiet_whispers` (ignored;
 `HEX_VAD_MODEL`, `HEX_VAD_SPEECH_WAV`, `HEX_VAD_WHISPER_WAV`) run the real
-detector, and `an_installed_model_does_not_wait_for_the_speech_detector` checks
-the background download.
+detector, and `an_installed_model_never_fetches_the_speech_detector` and
+`a_missing_detector_stays_unloaded_and_is_never_downloaded` check that nothing
+fetches it.
 Key resolution: [keyboard.rs](../../src/keyboard.rs); non-Latin layout
 fallback details live in [shortcut recovery](recovery.md#keyboard-layout-resolution).
 Checks in [parakeet.rs](../../src/parakeet.rs):

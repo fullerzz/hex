@@ -115,15 +115,13 @@ private actor AppleSpeechSession {
 
         do {
             let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
-            let status = await AssetInventory.status(forModules: [transcriber])
-            if status != .installed,
-               let request = try await AssetInventory.assetInstallationRequest(
-                   supporting: [transcriber]
-               ) {
-                try await request.downloadAndInstall()
-            }
+            // Hex never downloads speech models, Apple's included: assets
+            // macOS already has are used, and a missing locale asks for a
+            // model file instead.
             guard await AssetInventory.status(forModules: [transcriber]) == .installed else {
-                throw BridgeError("Apple Speech assets are not installed for \(locale.identifier).")
+                throw BridgeError(
+                    "Apple Speech for \(locale.identifier) isn't on this Mac, and Hex doesn't download speech models. Choose your model file."
+                )
             }
             let analyzer = makeAnalyzer(transcriber)
             try await analyzer.prepareToAnalyze(in: Self.audioFormat)

@@ -2868,19 +2868,34 @@ fn a_new_install_opens_the_first_run() {
     assert!(ui.first_run.is_some(), "the story opens over the tour");
 }
 
+/// First launch: onboarding asks for the person's model file and never asks
+/// the service for a model by itself, so nothing can download.
 #[test]
-fn onboarding_downloads_the_model_through_the_service() {
+fn onboarding_asks_for_a_model_file_and_never_downloads() {
+    let attempts = crate::net::attempts_for_test();
     let mut rt = runtime("onboarding", true, PANE_SIZE);
-    // The download starts as soon as onboarding opens.
-    assert!(matches!(
-        sent(&rt),
-        [Request::ChooseModel {
-            model: TranscriptionModelId::ParakeetUnifiedEnglish,
-            ..
-        }]
-    ));
-    assert!(texts(&rt).contains(&"Setting up Hex".to_owned()));
-    // The service finishes: the model is installed and the practice opens.
+    settle(&mut rt);
+    assert!(
+        sent(&rt).is_empty(),
+        "nothing starts by itself: {:?}",
+        sent(&rt)
+    );
+    let shown = texts(&rt);
+    assert!(
+        shown.contains(&"Choose your model file".to_owned()),
+        "{shown:?}"
+    );
+    assert!(rt.find("use-file").is_some(), "Choose your model file…");
+    assert!(
+        !shown.iter().any(|line| line.contains("Downloading")),
+        "{shown:?}"
+    );
+    assert_eq!(
+        crate::net::attempts_for_test(),
+        attempts,
+        "no download was attempted"
+    );
+    // The person's file is in: the model is installed and the practice opens.
     rt.state.picker.installed = Some(vec![TranscriptionModelId::ParakeetUnifiedEnglish]);
     settle(&mut rt);
     rt.update(|ui, _| onboarding_kit::live::fixture_resume(ui, Page::Try));
@@ -2898,7 +2913,7 @@ fn onboarding_downloads_the_model_through_the_service() {
 fn a_found_model_moves_on_without_a_download_and_back_returns_to_it() {
     let mut rt = runtime("onboarding-model-found", false, PANE_SIZE);
     assert!(rt.find("model-list").is_some());
-    tap(&mut rt, "model1");
+    tap(&mut rt, "model0");
     // The service saves the pick and has the found file ready: the list
     // stays, with no "Setting up Hex" download page.
     rt.state.settings.transcription = TranscriptionSelection {
@@ -2913,10 +2928,7 @@ fn a_found_model_moves_on_without_a_download_and_back_returns_to_it() {
         "{shown:?}"
     );
     assert!(!shown.contains(&"Setting up Hex".to_owned()), "{shown:?}");
-    assert!(
-        shown.contains(&"Parakeet Unified English".to_owned()),
-        "the rows stay"
-    );
+    assert!(shown.contains(&"Whisper Small".to_owned()), "the rows stay");
     tap(&mut rt, "continue");
     rt.update(|ui, _| onboarding_kit::live::fixture_resume(ui, Page::Demo));
     settle(&mut rt);
@@ -2928,13 +2940,16 @@ fn a_found_model_moves_on_without_a_download_and_back_returns_to_it() {
     assert!(rt.find("model-list").is_some());
 }
 
+/// Missing-file recovery: a chosen file that can't be used says why and
+/// asks for another file; nothing offers to fetch a replacement.
 #[test]
-fn a_failed_download_names_its_cause_and_offers_a_model_file() {
+fn an_invalid_model_file_names_its_cause_and_asks_for_another() {
+    let attempts = crate::net::attempts_for_test();
     let mut rt = runtime("onboarding", false, PANE_SIZE);
     if let Some(view) = &mut rt.state.view {
         view.transcription.preparing = None;
         view.transcription.error = Some(
-            "Couldn't reach huggingface.co through the proxy proxy.corp:8080: the proxy refused (403)\n\nCheck your connection, then retry, or choose a model file."
+            "Parakeet Unified English's file doesn't match the model Hex expects. Choose another model file.: checksum mismatch"
                 .into(),
         );
     }
@@ -2942,37 +2957,35 @@ fn a_failed_download_names_its_cause_and_offers_a_model_file() {
     settle(&mut rt);
     let shown = texts(&rt);
     assert!(
-        shown.contains(
-            &"Couldn't reach huggingface.co through the proxy proxy.corp:8080: the proxy refused (403)"
-                .to_owned()
-        ),
+        shown
+            .iter()
+            .any(|line| line.contains("Choose another model file")),
         "{shown:?}"
     );
-    assert!(shown.contains(&"Use a model file…".to_owned()), "{shown:?}");
-    assert!(shown.contains(&"Try again".to_owned()), "{shown:?}");
+    assert!(
+        shown.contains(&"Choose your model file…".to_owned()),
+        "{shown:?}"
+    );
+    assert!(!shown.contains(&"Try again".to_owned()), "{shown:?}");
+    assert!(sent(&rt).is_empty(), "nothing is fetched to replace it");
+    assert_eq!(
+        crate::net::attempts_for_test(),
+        attempts,
+        "no download was attempted"
+    );
 }
 
 #[test]
-fn with_no_model_found_onboarding_downloads_the_recommended_model_with_no_list() {
+fn with_no_model_found_onboarding_asks_for_a_file_with_no_list() {
     for scene in ["onboarding", "mac-onboarding"] {
         let rt = runtime(scene, false, PANE_SIZE);
         assert!(rt.state.found.models.is_empty());
-        // The download starts on its own, before any step or pick.
-        assert!(
-            matches!(
-                sent(&rt),
-                [Request::ChooseModel {
-                    model: TranscriptionModelId::ParakeetUnifiedEnglish,
-                    ..
-                }]
-            ),
-            "{scene}: {:?}",
-            sent(&rt)
-        );
+        // Nothing starts on its own: no step or pick asks for a model.
+        assert!(sent(&rt).is_empty(), "{scene}: {:?}", sent(&rt));
         let shown = texts(&rt);
         assert!(rt.find("model-list").is_none(), "{scene}: no model list");
         assert!(
-            shown.contains(&"Setting up Hex".to_owned()),
+            shown.contains(&"Choose your model file".to_owned()),
             "{scene}: {shown:?}"
         );
         assert!(
@@ -2983,10 +2996,25 @@ fn with_no_model_found_onboarding_downloads_the_recommended_model_with_no_list()
 }
 
 #[test]
-fn the_onboarding_model_list_starts_the_row_picked_or_the_recommended_one() {
-    // Continue with no pick starts the selected, recommended model.
+fn the_onboarding_model_list_offers_only_files_on_this_computer() {
+    // Hex's recommendation isn't here, so it isn't a row: there's nothing
+    // to download. Continue with no pick starts the first file found.
     let mut rt = runtime("onboarding-model-found", false, PANE_SIZE);
     assert!(sent(&rt).is_empty(), "nothing starts before a pick");
+    assert!(
+        !texts(&rt).contains(&"Parakeet Unified English".to_owned()),
+        "no row for a model that isn't here"
+    );
+    tap(&mut rt, "continue");
+    assert!(matches!(
+        sent(&rt),
+        [Request::ChooseModel {
+            model: TranscriptionModelId::ParakeetV3,
+            ..
+        }]
+    ));
+    // The recommended model's own file found here is a row, first.
+    let mut rt = runtime("onboarding-model-found-recommended", false, PANE_SIZE);
     tap(&mut rt, "continue");
     assert!(matches!(
         sent(&rt),
@@ -2995,17 +3023,20 @@ fn the_onboarding_model_list_starts_the_row_picked_or_the_recommended_one() {
             ..
         }]
     ));
-    // Picking a found catalog model uses it, with no download of ours.
+    // Picking another found row uses it.
     let mut rt = runtime("onboarding-model-found", false, PANE_SIZE);
     tap(&mut rt, "model1");
-    assert!(matches!(
-        sent(&rt),
-        [Request::ChooseModel {
-            model: TranscriptionModelId::ParakeetV3,
-            ..
-        }]
-    ));
     assert_eq!(rt.state.found.picked, Some(1));
+    assert!(
+        !sent(&rt).iter().any(|request| matches!(
+            request,
+            Request::ChooseModel {
+                model: TranscriptionModelId::ParakeetUnifiedEnglish,
+                ..
+            }
+        )),
+        "never the recommended model, which isn't here"
+    );
 }
 
 /// The microphone field's value. An open menu is modal, so the field behind

@@ -1,14 +1,13 @@
 //! Silero voice activity detection, used to keep audio without speech away
 //! from the transcription models, which tend to invent text for it.
 //!
-//! The detector is optional. While its file is missing it downloads in the
-//! background, and every caller falls back to its level-only silence check.
+//! The detector is optional, and Hex never downloads it: it runs only once
+//! the person supplies its file (`hex model import --speech-detector`).
+//! Until then every caller falls back to its level-only silence check.
 
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
-#[cfg(not(test))]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use color_eyre::eyre::Result;
@@ -36,7 +35,7 @@ enum State {
 #[cfg_attr(test, allow(dead_code))]
 static STATE: Mutex<State> = Mutex::new(State::Unloaded);
 #[cfg_attr(test, allow(dead_code))]
-static DOWNLOAD_STARTED: AtomicBool = AtomicBool::new(false);
+static MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 #[cfg_attr(test, allow(dead_code))]
 static RUN_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -118,7 +117,7 @@ fn heard(samples: &[f32]) -> Option<Vec<VadSegment>> {
 }
 
 /// Loads an installed detector in the background so the first dictation does
-/// not pay for it. It never downloads: preparation at launch stays offline.
+/// not pay for it. It never downloads.
 pub(crate) fn prewarm() {
     #[cfg(not(test))]
     if transcription_models::speech_detector_installed() {
@@ -135,16 +134,18 @@ fn lock_state() -> MutexGuard<'static, State> {
     STATE.lock().unwrap_or_else(|error| error.into_inner())
 }
 
-/// The loaded session, loading it on first use. A missing detector starts a
-/// background download and stays unloaded, so it loads once the file lands.
+/// The loaded session, loading it on first use. A missing detector stays
+/// unloaded, so it loads once the person supplies the file.
 #[cfg_attr(test, allow(dead_code))]
 fn loaded_session(state: &mut State) -> Option<&mut VadSession> {
     if matches!(state, State::Unloaded) {
-        if !transcription_models::speech_detector_installed() {
-            start_download();
+        let Some(path) = transcription_models::installed_speech_detector() else {
+            if !MISSING_LOGGED.swap(true, Ordering::Relaxed) {
+                tracing::info!("no speech detector supplied; using the level-only silence check");
+            }
             return None;
-        }
-        *state = match transcription_models::speech_detector_path().and_then(|path| load(&path)) {
+        };
+        *state = match load(&path) {
             Ok(session) => State::Loaded(session),
             Err(error) => {
                 tracing::warn!(%error, "could not load the speech detector");
@@ -156,33 +157,6 @@ fn loaded_session(state: &mut State) -> Option<&mut VadSession> {
         State::Loaded(session) => Some(session),
         State::Unloaded | State::Failed => None,
     }
-}
-
-/// Starts a background download of the detector unless one is running.
-/// Tests only count the request.
-pub(crate) fn start_download() {
-    #[cfg(test)]
-    DOWNLOAD_REQUESTS.with(|requests| requests.set(requests.get() + 1));
-    #[cfg(not(test))]
-    start_download_once();
-}
-
-#[cfg(not(test))]
-fn start_download_once() {
-    if DOWNLOAD_STARTED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    let _ = std::thread::Builder::new()
-        .name("hex-speech-detector-download".into())
-        .spawn(|| {
-            if let Err(error) =
-                transcription_models::download_speech_detector(&AtomicBool::new(false))
-            {
-                tracing::warn!(%error, "could not download the speech detector");
-                // The next dictation or meeting chunk tries again.
-                DOWNLOAD_STARTED.store(false, Ordering::Relaxed);
-            }
-        });
 }
 
 /// Loads the detector on the CPU: it loads in tens of milliseconds there,
@@ -220,13 +194,6 @@ fn segments(session: &mut VadSession, samples: &[f32]) -> Result<Vec<VadSegment>
 #[cfg(test)]
 thread_local! {
     static OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-    static DOWNLOAD_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// How many detector downloads this thread requested.
-#[cfg(test)]
-pub(crate) fn download_requests_for_test() -> usize {
-    DOWNLOAD_REQUESTS.with(std::cell::Cell::get)
 }
 
 /// Makes `contains_speech` answer `verdict` on this thread until the guard
@@ -313,6 +280,30 @@ mod tests {
         let loaded = load(&path);
         std::fs::remove_file(&path).unwrap();
         assert!(loaded.is_err());
+    }
+
+    /// First use without a supplied detector: nothing loads, nothing is
+    /// fetched, and the models folder stays as it was.
+    #[test]
+    fn a_missing_detector_stays_unloaded_and_is_never_downloaded() {
+        let models =
+            std::env::temp_dir().join(format!("hex-no-speech-detector-{}", std::process::id()));
+        std::fs::create_dir_all(&models).unwrap();
+        transcription_models::set_test_models_dir(Some(models.clone()));
+        let attempts = crate::net::attempts_for_test();
+        let mut state = State::Unloaded;
+        assert!(loaded_session(&mut state).is_none());
+        assert!(loaded_session(&mut state).is_none());
+        assert!(matches!(state, State::Unloaded));
+        let left = std::fs::read_dir(&models).unwrap().count();
+        transcription_models::set_test_models_dir(None);
+        std::fs::remove_dir_all(&models).unwrap();
+        assert_eq!(left, 0, "nothing was written to the models folder");
+        assert_eq!(
+            crate::net::attempts_for_test(),
+            attempts,
+            "no download was attempted"
+        );
     }
 
     #[test]

@@ -447,8 +447,24 @@ fn download_page(p: Paint, s: &Onboard, waiting: bool) -> El {
         return models_page(p, s, live);
     }
     let d = download(s);
+    // Hex never downloads a model: without one, the page asks for the
+    // person's file instead of showing a download.
+    let needs_file = !waiting && s.live.as_ref().is_some_and(|live| live.needs_file);
 
-    let head = if waiting {
+    let head = if needs_file {
+        heading(
+            p,
+            s,
+            "choose-file-head",
+            tr("Choose your model file"),
+            lead(
+                p,
+                tr(
+                    "Hex doesn't download speech models. Choose a GGUF speech model on this computer.",
+                ),
+            ),
+        )
+    } else if waiting {
         heading(
             p,
             s,
@@ -518,52 +534,44 @@ fn download_page(p: Paint, s: &Onboard, waiting: bool) -> El {
         s.motion.staggered(progress_capsule, 2.0, 6.0)
     };
 
-    // A network that blocks the download: why, then retry or use a model
-    // file brought some other way (#894).
-    let retry = s.live.as_ref().filter(|live| live.failed).map(|live| {
-        let why = live
-            .failure
-            .clone()
-            .unwrap_or_else(|| tr("The download stopped.").to_owned());
-        col()
-            .key("download-failed")
-            .gap(12.0)
-            .items_center()
-            .transition(arrives())
-            .child(
-                text(why)
-                    .key("why")
-                    .font(LEAD)
-                    .color(p.muted())
-                    .align(rune::Align::Center)
-                    .wrap()
-                    .w(TRY_W),
-            )
-            .child(
-                row()
-                    .key("actions")
-                    .gap(10.0)
-                    .center_y()
-                    .child(
-                        Button::new(if live.using_file {
-                            tr("Adding model…")
-                        } else {
-                            tr("Use a model file…")
-                        })
-                        .variant(ButtonVariant::Neutral)
-                        .on_press(live::use_file)
-                        .build_push(p.k)
-                        .key("use-file"),
-                    )
-                    .child(
-                        Button::new(tr("Try again"))
-                            .variant(ButtonVariant::Neutral)
-                            .on_press(live::retry_download)
-                            .build_push(p.k)
-                            .key("retry-download"),
-                    ),
-            )
-    });
+    // No model yet, or the chosen one failed: why, if anything went wrong,
+    // then choose a model file. Nothing is ever fetched to replace it.
+    let choose = s
+        .live
+        .as_ref()
+        .filter(|live| !waiting && (live.needs_file || live.failed))
+        .map(|live| {
+            let why = live
+                .failed
+                .then(|| live.failure.clone())
+                .flatten()
+                .map(|why| {
+                    text(why)
+                        .key("why")
+                        .font(LEAD)
+                        .color(p.muted())
+                        .align(rune::Align::Center)
+                        .wrap()
+                        .w(TRY_W)
+                });
+            col()
+                .key("choose-model-file")
+                .gap(12.0)
+                .items_center()
+                .transition(arrives())
+                .children(why)
+                .child(
+                    Button::new(if live.using_file {
+                        tr("Adding model…")
+                    } else {
+                        tr("Choose your model file…")
+                    })
+                    .variant(ButtonVariant::Contrast)
+                    .on_press(live::use_file)
+                    .build_push(p.k)
+                    .key("use-file"),
+                )
+        });
     col()
         .key(if waiting { "waiting" } else { "download" })
         .gap(22.0)
@@ -582,8 +590,8 @@ fn download_page(p: Paint, s: &Onboard, waiting: bool) -> El {
             s,
         ))
         .child(after_flight(head, s))
-        .child(progress_capsule)
-        .children(retry)
+        .children((!needs_file).then_some(progress_capsule))
+        .children(choose)
         .children(without_model(p, s))
 }
 
@@ -603,9 +611,8 @@ fn sketch_page(p: Paint, s: &Onboard) -> El {
         ))
         .children(super::sketches::card(p, s))
 }
-/// The one way past a model that can't be had (#894): once its download
-/// failed or stalled, and every permission is ready, onboarding can finish
-/// without one.
+/// The one way past a model that isn't here (#894): while none is ready,
+/// and every permission is, onboarding can finish without one.
 fn without_model(p: Paint, s: &Onboard) -> Option<El> {
     s.live
         .as_ref()

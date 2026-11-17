@@ -4,9 +4,10 @@
 # golden: the macOS and Windows scenes are the same window drawn from
 # fixtures, so they render here too.
 #
-#   1. Renders every onboarding scene (Setting up Hex with nothing found, a
-#      stopped download, Settings after Continue without a model, the model step with found models, with the
-#      recommended model already present, ours downloading, Back to it, the
+#   1. Renders every onboarding scene (Choose your model file with nothing
+#      found, a chosen file that couldn't be used, Settings after Continue
+#      without a model, the model step with found models, with the
+#      recommended model already present, a pick being checked, Back to it, the
 #      demo, permissions, Windows' microphone switch, the paste permission on
 #      GNOME and KDE Wayland, Almost ready, the
 #      practice game, Hex is ready) in both
@@ -18,14 +19,15 @@
 #      passes by skipping.
 #   2. Checks Skip: it shows only on the optional pages (the demo and the
 #      practice) and lands on the next step setup still needs (permissions,
-#      then Almost ready while the model downloads, else Hex is ready),
+#      then Almost ready while the model is checked, else Hex is ready),
 #      never closing onboarding. Then Continue without a model: it shows only
-#      on the download step once the download failed or stalled, finishes
-#      onboarding, and Settings says no model is installed.
+#      on the model step while no model is ready, finishes onboarding, and
+#      Settings says no model is installed.
 #   3. Walks a first run through the real onboarding in a clean temporary
 #      data folder (fresh settings, no models, an empty Hugging Face cache, an
-#      English locale): it downloads and verifies the model onboarding picks,
-#      plays the practice game, and reaches Hex is ready.
+#      English locale): it asks for a model file and downloads nothing,
+#      imports and verifies HEX_ONBOARDING_MODEL_FILE (a GGUF speech model you
+#      supply), plays the practice game, and reaches Hex is ready.
 #
 #   scripts/check-onboarding.sh [<out-dir>]   (default target/onboarding-check)
 #

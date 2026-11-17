@@ -17,6 +17,8 @@ use std::time::Duration;
 
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
+#[cfg(test)]
+pub(crate) use download::attempts_for_test;
 pub use download::{Download, download};
 pub use proxy::proxy_for;
 
