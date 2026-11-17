@@ -294,8 +294,8 @@ pub enum ModelCommand {
         #[command(flatten)]
         output: Output,
     },
-    /// Download a model, then switch to it. Without a model, the selected
-    /// one. On Linux and Windows it downloads here when Hex isn't running.
+    /// Check a model file already here, then switch to it (default: the
+    /// selected one). Never downloads: add files with `hex model import`.
     Install {
         model: Option<String>,
         #[arg(long)]
@@ -309,7 +309,7 @@ pub enum ModelCommand {
         #[command(flatten)]
         output: Output,
     },
-    /// Stop a download or load in progress.
+    /// Stop a model check or load in progress.
     Cancel {
         #[command(flatten)]
         output: Output,
@@ -342,8 +342,11 @@ pub enum ModelCommand {
     Import {
         path: std::path::PathBuf,
         /// The name the picker shows (default: the file's general.name).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "vad")]
         name: Option<String>,
+        /// Install it as the speech detector (Silero VAD v6.2, pinned SHA-256).
+        #[arg(long = "speech-detector")]
+        vad: bool,
     },
     /// Rename an imported or found model.
     Rename { model: String, name: String },
@@ -506,7 +509,7 @@ pub fn run(command: ControlCli, top_level: impl FnOnce() -> clap::Command) -> u8
             } => install_model(model, language, output),
             ModelCommand::Switch { output } => send(ControlCommand::ModelSwitch, output),
             ModelCommand::Cancel { output } => send(ControlCommand::ModelCancel, output),
-            ModelCommand::Import { path, name } => report(import_model(&path, name.as_deref())),
+            ModelCommand::Import { path, name, vad } => report(import(&path, name.as_deref(), vad)),
             ModelCommand::Rename { model, name } => report(imported(&model).and_then(|id| {
                 crate::transcription::custom_models::rename(id, &name)?;
                 println!("renamed\t{}", id.as_str());
@@ -729,9 +732,13 @@ fn save_selection(
 
 /// `hex model import`: checks, copies, and records the file here, in this
 /// process; a running Hex lists it at once.
-fn import_model(path: &std::path::Path, name: Option<&str>) -> color_eyre::Result<()> {
-    use crate::transcription::custom_models;
-    let id = custom_models::import(path, name, &std::sync::atomic::AtomicBool::new(false))?;
+fn import(path: &std::path::Path, name: Option<&str>, vad: bool) -> color_eyre::Result<()> {
+    use crate::transcription::{custom_models, models};
+    if vad {
+        return models::import_speech_detector(path, &Default::default())
+            .map(|to| println!("installed\tspeech-detector\t{}", to.display()));
+    }
+    let id = custom_models::import(path, name, &Default::default())?;
     let definition = custom_models::definition(id);
     println!("imported\t{}\t{}", id.as_str(), definition.name);
     Ok(())

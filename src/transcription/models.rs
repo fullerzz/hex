@@ -198,7 +198,8 @@ pub struct ModelChoice {
 
 /// Silero VAD v6.2. Dictation and meetings skip audio it finds no speech in,
 /// because models hallucinate closing phrases such as "thank you" on silence
-/// and room noise. It downloads with every transcription model.
+/// and room noise. Hex never downloads it: the person supplies the file
+/// (`hex model import --speech-detector`), or Hex goes without.
 pub const SPEECH_DETECTOR_ARTIFACT: GgufArtifact = GgufArtifact {
     filename: Cow::Borrowed("silero-vad-v6.2-F32.gguf"),
     stored_as: None,
@@ -209,7 +210,6 @@ pub const SPEECH_DETECTOR_ARTIFACT: GgufArtifact = GgufArtifact {
     architecture: "silero_vad",
     variant: Cow::Borrowed("v6.2"),
 };
-#[cfg_attr(test, allow(dead_code))]
 const SPEECH_DETECTOR_NAME: &str = "the speech detector";
 
 pub fn definition(id: TranscriptionModelId) -> ModelRef {
@@ -532,13 +532,21 @@ fn verify_installed_at(path: &Path, model: &ModelDefinition, canceled: &AtomicBo
             bail!("{} is missing. Import it again.", model.name);
         }
         bail!(
-            "{} is no longer installed. Open Settings to download it.",
+            "{} isn't on this computer. Choose your model file: Hex doesn't download speech models.",
             model.name
         );
     }
     let _lock = lock_downloads(path.parent().expect("model directory"), canceled, || {})?;
     if !verification_receipt_matches(path, model) {
-        verify_file_with_cancel(path, model, canceled)?;
+        verify_file_with_cancel(path, model, canceled).map_err(|error| {
+            if canceled.load(Ordering::Relaxed) {
+                return error;
+            }
+            error.wrap_err(format!(
+                "{}'s file doesn't match the model Hex expects. Choose another model file.",
+                model.name
+            ))
+        })?;
         write_verification_receipt(path, model)?;
     }
     Ok(())
@@ -689,200 +697,95 @@ fn artifact_receipt_matches(path: &Path, artifact: &GgufArtifact) -> bool {
         && modified_ns(&metadata).is_some_and(|modified| modified == receipt.modified_ns)
 }
 
-/// `hex model install` on Linux and Windows, and tests.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-pub fn download_with_progress(
+/// Readies `model` from files already on this computer: a catalog model in
+/// Hex's models folder or found in place, or an import. This fork never
+/// downloads a model: a missing or invalid file asks the person to choose
+/// one, and nothing is fetched to replace it. `verified_bytes` reaches the
+/// model's size once its file checks out.
+pub fn ensure_installed(
     model: &ModelDefinition,
     canceled: &AtomicBool,
-    downloaded_bytes: &AtomicU64,
-) -> Result<PathBuf> {
-    download_with_stage_progress(
-        model,
-        canceled,
-        downloaded_bytes,
-        &AtomicU8::new(ModelPreparationStage::Downloading as u8),
-    )
-}
-
-pub fn download_with_stage_progress(
-    model: &ModelDefinition,
-    canceled: &AtomicBool,
-    downloaded_bytes: &AtomicU64,
+    verified_bytes: &AtomicU64,
     stage: &AtomicU8,
 ) -> Result<PathBuf> {
     let ModelRuntime::Gguf(artifact) = &model.runtime else {
         bail!("{} is installed and managed by macOS", model.name);
     };
-    // An import has nothing to download: Hex checks its own copy. A catalog
-    // model another app already downloaded is checked and used where it is.
-    let path = if model.id.is_custom() || model_path(model).is_ok_and(|path| in_place(&path)) {
-        ModelPreparationStage::Verifying.store(stage);
-        let path = verify_installed(model, canceled)?;
-        downloaded_bytes.store(artifact.bytes, Ordering::Relaxed);
-        path
-    } else {
-        download_artifact(artifact, &model.name, canceled, downloaded_bytes, stage)?
-    };
-    // In the background, so an installed model activates at once even
-    // offline. Until the detector lands, dictation and meetings keep their
-    // level-only silence handling.
-    if !speech_detector_installed() {
-        crate::transcription::speech_detector::start_download();
-    }
+    ModelPreparationStage::Verifying.store(stage);
+    let path = verify_installed(model, canceled)?;
+    verified_bytes.store(artifact.bytes, Ordering::Relaxed);
     Ok(path)
 }
 
-/// Downloads the speech detector unless a verified copy is installed.
-#[cfg_attr(test, allow(dead_code))]
-pub fn download_speech_detector(canceled: &AtomicBool) -> Result<PathBuf> {
-    download_artifact(
-        &SPEECH_DETECTOR_ARTIFACT,
-        SPEECH_DETECTOR_NAME,
-        canceled,
-        &AtomicU64::new(0),
-        &AtomicU8::new(ModelPreparationStage::Downloading as u8),
-    )
-}
-
+/// Where Hex keeps the speech detector the person supplied.
 pub fn speech_detector_path() -> Result<PathBuf> {
     Ok(models_dir()?.join(SPEECH_DETECTOR_ARTIFACT.local_name()))
 }
 
-/// Whether the speech detector is installed at its pinned size. Its checksum
-/// is checked when it downloads.
-pub fn speech_detector_installed() -> bool {
-    speech_detector_path()
-        .and_then(|path| Ok(fs::metadata(path)?.len() == SPEECH_DETECTOR_ARTIFACT.bytes))
-        .unwrap_or(false)
+/// The speech detector, when the person supplied the pinned file: its size
+/// and SHA-256 are checked once and remembered in a receipt. Hex never
+/// downloads it; without it, dictation and meetings keep their level-only
+/// silence check.
+pub fn installed_speech_detector() -> Option<PathBuf> {
+    let path = speech_detector_path().ok()?;
+    if artifact_receipt_matches(&path, &SPEECH_DETECTOR_ARTIFACT) {
+        return Some(path);
+    }
+    if !fs::metadata(&path).is_ok_and(|metadata| metadata.len() == SPEECH_DETECTOR_ARTIFACT.bytes) {
+        return None;
+    }
+    let canceled = AtomicBool::new(false);
+    match verify_artifact(
+        &path,
+        &SPEECH_DETECTOR_ARTIFACT,
+        SPEECH_DETECTOR_NAME,
+        &canceled,
+    )
+    .and_then(|()| write_artifact_receipt(&path, &SPEECH_DETECTOR_ARTIFACT))
+    {
+        Ok(()) => Some(path),
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "ignoring a speech detector that doesn't match");
+            None
+        }
+    }
 }
 
-fn download_artifact(
-    artifact: &GgufArtifact,
-    name: &str,
-    canceled: &AtomicBool,
-    downloaded_bytes: &AtomicU64,
-    stage: &AtomicU8,
-) -> Result<PathBuf> {
-    ModelPreparationStage::Downloading.store(stage);
-    check_canceled(canceled)?;
-    let directory = models_dir()?;
-    fs::create_dir_all(&directory)?;
-    let destination = directory.join(artifact.local_name());
-    let partial = destination.with_extension("gguf.partial");
-    // Another process may be writing this same partial file: its bytes are
-    // this download's progress too, so waiting shows them instead of 0.
-    let _lock = lock_downloads(&directory, canceled, || {
-        if let Ok(metadata) = fs::metadata(&partial) {
-            downloaded_bytes.store(metadata.len().min(artifact.bytes), Ordering::Relaxed);
-        }
-    })?;
-    check_canceled(canceled)?;
-    delete_set_aside_in(&directory);
-    if destination.exists() {
-        if artifact_receipt_matches(&destination, artifact) {
-            downloaded_bytes.store(artifact.bytes, Ordering::Relaxed);
-            return Ok(destination);
-        }
-        ModelPreparationStage::Verifying.store(stage);
-        match verify_artifact(&destination, artifact, name, canceled) {
-            Ok(()) => {
-                write_artifact_receipt(&destination, artifact)?;
-                downloaded_bytes.store(artifact.bytes, Ordering::Relaxed);
-                return Ok(destination);
-            }
-            Err(error) if canceled.load(Ordering::Relaxed) => return Err(error),
-            Err(error) => {
-                tracing::warn!(%error, path = %destination.display(), "will replace invalid transcription model after verifying its replacement");
-            }
-        }
-    }
-    let mut partial_len = fs::metadata(&partial).ok().map(|metadata| metadata.len());
-    if partial_len > Some(artifact.bytes) {
-        fs::remove_file(&partial)?;
-        partial_len = None;
-    }
-    downloaded_bytes.store(partial_len.unwrap_or(0), Ordering::Relaxed);
-    if partial_len == Some(artifact.bytes) {
-        match verify_and_promote_partial(
-            &partial,
-            &destination,
-            &directory,
-            artifact,
-            name,
-            canceled,
-            downloaded_bytes,
-            stage,
-        ) {
-            Ok(()) => return Ok(destination),
-            Err(error) if canceled.load(Ordering::Relaxed) => return Err(error),
-            Err(error) => {
-                tracing::warn!(%error, path = %partial.display(), "replacing invalid partial transcription model");
-                fs::remove_file(&partial)?;
-                downloaded_bytes.store(0, Ordering::Relaxed);
-            }
-        }
-    }
-    ModelPreparationStage::Downloading.store(stage);
-    // In-process HTTPS with the system's proxy and trusted roots (`net`), so
-    // managed networks with a proxy or TLS inspection work (#894).
-    let url = artifact.download_url();
-    let fetched = crate::net::download(
-        &crate::net::Download {
-            url: &url,
-            user_agent: &format!("hex/{}", crate::VERSION),
-            size: Some(artifact.bytes),
-            canceled: Some(canceled),
-        },
-        &partial,
-        |bytes| downloaded_bytes.store(bytes, Ordering::Relaxed),
-    );
-    if let Err(error) = fetched {
-        check_canceled(canceled)?;
-        // The first line is the reason onboarding and Settings show.
+/// Whether a verified speech detector is installed.
+pub fn speech_detector_installed() -> bool {
+    installed_speech_detector().is_some()
+}
+
+/// Copies the speech detector from a file the person chose into Hex's models
+/// folder, after checking it is the pinned Silero VAD file. The original is
+/// left as it is.
+pub fn import_speech_detector(source: &Path, canceled: &AtomicBool) -> Result<PathBuf> {
+    if !source.is_file() {
         bail!(
-            "{error}\n\nCheck your connection, then retry, or choose a model file. \
-             On a managed network, ask IT to allow downloads from huggingface.co and \
-             its download CDN. Download progress is kept for retry."
+            "{} isn't a file. Choose another speech detector file.",
+            source.display()
         );
     }
-    check_canceled(canceled)?;
-    if let Err(error) = verify_and_promote_partial(
-        &partial,
-        &destination,
-        &directory,
-        artifact,
-        name,
+    verify_artifact(
+        source,
+        &SPEECH_DETECTOR_ARTIFACT,
+        SPEECH_DETECTOR_NAME,
         canceled,
-        downloaded_bytes,
-        stage,
-    ) {
-        if !canceled.load(Ordering::Relaxed) {
-            let _ = fs::remove_file(&partial);
-        }
-        return Err(error);
-    }
+    )
+    .wrap_err(format!(
+        "That isn't {} ({}). Choose another file.",
+        SPEECH_DETECTOR_NAME, SPEECH_DETECTOR_ARTIFACT.filename
+    ))?;
+    let directory = models_dir()?;
+    fs::create_dir_all(&directory)?;
+    let destination = directory.join(SPEECH_DETECTOR_ARTIFACT.local_name());
+    let copy = destination.with_extension("gguf.importing");
+    fs::copy(source, &copy)?;
+    sync_file(&copy)?;
+    replace_file(&copy, &destination)?;
+    sync_directory(&directory)?;
+    write_artifact_receipt(&destination, &SPEECH_DETECTOR_ARTIFACT)?;
     Ok(destination)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn verify_and_promote_partial(
-    partial: &Path,
-    destination: &Path,
-    directory: &Path,
-    artifact: &GgufArtifact,
-    name: &str,
-    canceled: &AtomicBool,
-    downloaded_bytes: &AtomicU64,
-    stage: &AtomicU8,
-) -> Result<()> {
-    ModelPreparationStage::Verifying.store(stage);
-    verify_artifact(partial, artifact, name, canceled)?;
-    sync_file(partial)?;
-    replace_file(partial, destination)?;
-    sync_directory(directory)?;
-    write_artifact_receipt(destination, artifact)?;
-    downloaded_bytes.store(artifact.bytes, Ordering::Relaxed);
-    Ok(())
 }
 
 fn verification_receipt_path(model_path: &Path) -> PathBuf {
@@ -1917,11 +1820,10 @@ mod tests {
     }
 
     #[test]
-    fn speech_detector_artifact_downloads_from_its_pinned_revision() {
+    fn speech_detector_is_pinned_to_one_silero_file() {
         assert_eq!(
-            SPEECH_DETECTOR_ARTIFACT.download_url(),
-            "https://huggingface.co/handy-computer/silero-vad-v6.2-gguf/resolve/\
-             a9b2d61c20ae4ddf3644edb34969e8185a485448/silero-vad-v6.2-F32.gguf"
+            SPEECH_DETECTOR_ARTIFACT.filename,
+            "silero-vad-v6.2-F32.gguf"
         );
         assert_eq!(SPEECH_DETECTOR_ARTIFACT.bytes, 1_241_056);
     }
@@ -1989,37 +1891,141 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    #[test]
-    fn an_installed_model_does_not_wait_for_the_speech_detector() {
-        let directory = std::env::temp_dir().join(format!(
-            "hex-installed-download-{}-{}",
-            std::process::id(),
-            NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed),
-        ));
-        fs::create_dir(&directory).unwrap();
-        fs::write(directory.join("fixture.gguf"), b"hello").unwrap();
-        TEST_MODELS_DIR.with(|models| *models.borrow_mut() = Some(directory.clone()));
-        let requests = crate::transcription::speech_detector::download_requests_for_test();
-        let downloaded = download_with_progress(
-            &fixture_model(),
+    /// A fresh models folder for one test, removed when it drops.
+    struct ModelsDir(PathBuf);
+
+    impl ModelsDir {
+        fn new(name: &str) -> Self {
+            let directory = std::env::temp_dir().join(format!(
+                "hex-{name}-{}-{}",
+                std::process::id(),
+                NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed),
+            ));
+            fs::create_dir(&directory).unwrap();
+            set_test_models_dir(Some(directory.clone()));
+            Self(directory)
+        }
+
+        /// What the folder holds besides the verification lock, so a test
+        /// sees nothing was fetched into it.
+        fn names(&self) -> Vec<String> {
+            let mut names: Vec<_> = fs::read_dir(&self.0)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name != ".download.lock")
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    impl Drop for ModelsDir {
+        fn drop(&mut self) {
+            set_test_models_dir(None);
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn ensure(model: &ModelDefinition) -> Result<PathBuf> {
+        ensure_installed(
+            model,
             &AtomicBool::new(false),
             &AtomicU64::new(0),
-        );
-        TEST_MODELS_DIR.with(|models| *models.borrow_mut() = None);
-        let detector_touched = directory
-            .join(SPEECH_DETECTOR_ARTIFACT.local_name())
-            .exists()
-            || directory
-                .join(SPEECH_DETECTOR_ARTIFACT.local_name())
-                .with_extension("gguf.partial")
-                .exists();
-        fs::remove_dir_all(&directory).unwrap();
-        assert_eq!(downloaded.unwrap(), directory.join("fixture.gguf"));
+            &AtomicU8::new(ModelPreparationStage::Downloading as u8),
+        )
+    }
+
+    #[test]
+    fn an_installed_model_never_fetches_the_speech_detector() {
+        let models = ModelsDir::new("installed-model");
+        fs::write(models.0.join("fixture.gguf"), b"hello").unwrap();
+        let attempts = crate::net::attempts_for_test();
         assert_eq!(
-            crate::transcription::speech_detector::download_requests_for_test(),
-            requests + 1
+            ensure(&fixture_model()).unwrap(),
+            models.0.join("fixture.gguf")
         );
-        assert!(!detector_touched);
+        assert!(!speech_detector_installed());
+        assert_eq!(
+            models.names(),
+            ["fixture.gguf", "fixture.gguf.verified.json"],
+            "nothing but the model and its receipt"
+        );
+        assert_eq!(
+            crate::net::attempts_for_test(),
+            attempts,
+            "no download was attempted"
+        );
+    }
+
+    /// Missing-file recovery: a model whose file is gone, or whose file
+    /// changed, asks for a file and is never fetched or replaced.
+    #[test]
+    fn a_missing_or_invalid_model_asks_for_a_file_and_never_downloads() {
+        let models = ModelsDir::new("missing-model");
+        let attempts = crate::net::attempts_for_test();
+        let model = fixture_model();
+
+        let missing = format!("{:#}", ensure(&model).unwrap_err());
+        assert!(missing.contains("Choose your model file"), "{missing}");
+        assert!(
+            models.names().is_empty(),
+            "nothing was fetched: {:?}",
+            models.names()
+        );
+
+        fs::write(models.0.join("fixture.gguf"), b"world").unwrap();
+        let invalid = format!("{:#}", ensure(&model).unwrap_err());
+        assert!(invalid.contains("Choose another model file"), "{invalid}");
+        assert_eq!(fs::read(models.0.join("fixture.gguf")).unwrap(), b"world");
+        assert_eq!(
+            models.names(),
+            ["fixture.gguf"],
+            "the bad file stays, unreplaced"
+        );
+
+        // The person chooses the right file: it is used, still offline.
+        fs::write(models.0.join("fixture.gguf"), b"hello").unwrap();
+        assert!(ensure(&model).is_ok());
+        assert_eq!(
+            crate::net::attempts_for_test(),
+            attempts,
+            "no download was attempted"
+        );
+    }
+
+    #[test]
+    fn the_speech_detector_comes_only_from_a_supplied_file() {
+        let models = ModelsDir::new("speech-detector");
+        let attempts = crate::net::attempts_for_test();
+        assert!(installed_speech_detector().is_none());
+
+        // A file of the right size but other bytes is neither used nor
+        // replaced.
+        let wrong = models.0.join(SPEECH_DETECTOR_ARTIFACT.local_name());
+        fs::write(&wrong, vec![0; SPEECH_DETECTOR_ARTIFACT.bytes as usize]).unwrap();
+        assert!(installed_speech_detector().is_none());
+        assert!(wrong.exists());
+
+        let chosen = models.0.join("chosen.gguf");
+        fs::write(&chosen, b"not silero").unwrap();
+        let error = format!(
+            "{:#}",
+            import_speech_detector(&chosen, &AtomicBool::new(false)).unwrap_err()
+        );
+        assert!(error.contains("Choose another file"), "{error}");
+        let error = import_speech_detector(&models.0.join("absent"), &AtomicBool::new(false))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Choose another speech detector file"),
+            "{error}"
+        );
+        assert!(installed_speech_detector().is_none());
+        assert_eq!(
+            crate::net::attempts_for_test(),
+            attempts,
+            "no download was attempted"
+        );
     }
 
     #[test]
@@ -2094,77 +2100,6 @@ mod tests {
         assert!(artifacts.iter().all(|artifact| !artifact.exists()));
         remove_installed_at(&path).unwrap();
         remove_installed_at(&directory.join("missing").join("fixture.gguf")).unwrap();
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn waiting_for_another_processs_download_reports_its_partial_bytes() {
-        use std::sync::Arc;
-
-        /// Holds the lock only until the worker is told to stop: a panic
-        /// anywhere in the test cancels it before the lock can be released,
-        /// so it never reaches the real download.
-        struct Held {
-            canceled: Arc<AtomicBool>,
-            lock: Option<File>,
-        }
-
-        impl Drop for Held {
-            fn drop(&mut self) {
-                self.canceled.store(true, Ordering::Relaxed);
-                drop(self.lock.take());
-            }
-        }
-
-        let directory = std::env::temp_dir().join(format!(
-            "hex-external-download-{}-{}",
-            std::process::id(),
-            NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed),
-        ));
-        fs::create_dir(&directory).unwrap();
-        let partial = directory
-            .join("fixture.gguf")
-            .with_extension("gguf.partial");
-        fs::write(&partial, b"hel").unwrap();
-        let canceled = Arc::new(AtomicBool::new(false));
-        // Another process (`hex model install` in a terminal) owns the lock
-        // and is still writing the partial file.
-        let held = Held {
-            canceled: canceled.clone(),
-            lock: Some(lock_downloads(&directory, &AtomicBool::new(false), || {}).unwrap()),
-        };
-
-        let worker_canceled = canceled.clone();
-        let downloaded = Arc::new(AtomicU64::new(0));
-        let worker_downloaded = downloaded.clone();
-        let worker_directory = directory.clone();
-        let worker = std::thread::spawn(move || {
-            // The fixture's models folder is thread-local.
-            set_test_models_dir(Some(worker_directory));
-            download_artifact(
-                &FIXTURE_ARTIFACT,
-                "the fixture",
-                &worker_canceled,
-                &worker_downloaded,
-                &AtomicU8::new(ModelPreparationStage::Downloading as u8),
-            )
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while downloaded.load(Ordering::Relaxed) != 3 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "waiting never reported the other process's bytes"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        // Canceled while still waiting: it never fetched a piece or promoted
-        // a file, so the test never touches the network.
-        canceled.store(true, Ordering::Relaxed);
-        let result = worker.join().unwrap();
-        drop(held);
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("canceled"), "{error}");
-        assert!(!directory.join("fixture.gguf").exists());
         fs::remove_dir_all(directory).unwrap();
     }
 

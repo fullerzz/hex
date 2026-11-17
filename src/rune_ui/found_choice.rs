@@ -1,14 +1,14 @@
 //! Onboarding's speech model list, shown only when the hub-cache scan found
 //! a compatible model (`found_models`): the first run's model step
-//! (`onboarding_kit::live`) shows one card of selectable rows, Hex's
-//! recommended model first and selected, then the models already on this
-//! computer. Picking a row starts it at once: ours downloads (or, when its
-//! exact file is already here, is used in place), and a found model is used
-//! where it is. Continue starts the selected row when none was picked.
-//! Without a found model the step is exactly as before.
+//! (`onboarding_kit::live`) shows one card of selectable rows: Hex's
+//! recommended model first when its exact file is already here, then the
+//! other models on this computer. Picking a row starts it at once, used where
+//! it is. Nothing downloads: Hex's recommendation is offered only as a file
+//! on this computer. Continue starts the selected row when none was picked.
+//! Without a found model the step asks for the person's model file.
 
 use super::Ui;
-use crate::desktop::i18n::{tr, tr_fill};
+use crate::desktop::i18n::tr;
 use crate::desktop::onboarding::{Input, ItemStatus, SetupItem};
 use crate::transcription::found_models::Found;
 use crate::transcription::models::{self as transcription_models, TranscriptionSelection};
@@ -38,9 +38,10 @@ fn recommended(ui: &Ui) -> TranscriptionSelection {
         .unwrap_or_else(|| ui.settings.transcription.clone())
 }
 
-/// One row of the list: Hex's recommended model, or a found file.
+/// One row of the list: Hex's recommended model's file, or another found
+/// file.
 enum Entry<'a> {
-    Recommended { on_disk: bool },
+    Recommended,
     Found(&'a Found),
 }
 
@@ -51,7 +52,9 @@ fn entries(ui: &Ui) -> Vec<Entry<'_>> {
         .models
         .iter()
         .any(|found| found.catalog == Some(recommended));
-    std::iter::once(Entry::Recommended { on_disk })
+    on_disk
+        .then_some(Entry::Recommended)
+        .into_iter()
         .chain(
             ui.found
                 .models
@@ -83,7 +86,7 @@ pub(super) fn rows(ui: &Ui, model: ItemStatus) -> Vec<ChoiceRow> {
 
 fn row(ui: &Ui, entry: &Entry<'_>, selected: bool, model: ItemStatus) -> ChoiceRow {
     let name = match entry {
-        Entry::Recommended { .. } => transcription_models::definition(recommended(ui).model)
+        Entry::Recommended => transcription_models::definition(recommended(ui).model)
             .name
             .to_string(),
         Entry::Found(found) => found.catalog.map_or_else(
@@ -95,33 +98,23 @@ fn row(ui: &Ui, entry: &Entry<'_>, selected: bool, model: ItemStatus) -> ChoiceR
     let line = match (entry, started, model) {
         (_, true, ItemStatus::Failed) => tr("Couldn't prepare this model").to_owned(),
         (_, true, ItemStatus::Ready) if !ui.found.adopting() => tr("Ready").to_owned(),
-        (Entry::Recommended { on_disk: false }, true, ItemStatus::Downloading(progress)) => {
-            tr_fill(
-                "Downloading… {}%",
-                &((progress * 100.0).round() as u32).to_string(),
-            )
-        }
         (_, true, _) if ui.found.adopting() || model != ItemStatus::Ready => {
             tr("Checking…").to_owned()
         }
-        (Entry::Recommended { on_disk: false }, ..) => tr_fill(
-            "{} download",
-            &transcription_models::definition(recommended(ui).model).size_label(),
-        ),
-        (Entry::Recommended { on_disk: true }, ..) => tr("On this computer").to_owned(),
+        (Entry::Recommended, ..) => tr("On this computer").to_owned(),
         (Entry::Found(found), ..) if found.catalog.is_some() => tr("On this computer").to_owned(),
         (Entry::Found(_), ..) => tr("On this computer · not tested by Hex").to_owned(),
     };
     ChoiceRow {
         name: name.to_owned(),
         line,
-        recommended: matches!(entry, Entry::Recommended { .. }),
+        recommended: matches!(entry, Entry::Recommended),
         selected,
     }
 }
 
-/// Whether the pick is under way or ready, so the first run can move on:
-/// ours downloading, or a model on this computer checked and in use.
+/// Whether the pick is under way or ready, so the first run can move on: a
+/// model on this computer being checked, or checked and in use.
 pub(super) fn started(ui: &Ui, model: ItemStatus) -> bool {
     ui.found.picked.is_some()
         && !ui.found.adopting()
@@ -145,7 +138,7 @@ pub(super) fn pick(ui: &mut Ui, index: usize) {
     }
     let found = match entries(ui).get(index) {
         None => return,
-        Some(Entry::Recommended { .. }) => None,
+        Some(Entry::Recommended) => None,
         Some(Entry::Found(found)) => Some((*found).clone()),
     };
     ui.found.picked = Some(index);

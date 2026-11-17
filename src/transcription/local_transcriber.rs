@@ -10,7 +10,7 @@ use crate::app_settings::TranscriptionDevice;
 use crate::transcription::gguf_session::{OfflineGgufSession, output_truncated};
 use crate::transcription::gpu_health;
 use crate::transcription::models::{
-    TranscriptionModelId, TranscriptionSelection, download_with_progress, model_path, validate,
+    TranscriptionModelId, TranscriptionSelection, ensure_installed, model_path, validate,
 };
 use crate::transcription::{pad_gguf_samples, requires_closing_mark, trailing_silence_samples};
 
@@ -68,12 +68,12 @@ pub(crate) fn device() -> TranscriptionDevice {
 
 pub fn install(selection: &TranscriptionSelection, canceled: &AtomicBool) -> Result<()> {
     let model = validate(selection)?;
-    let downloaded = AtomicU64::new(0);
-    println!("Installing {} ({})...", model.name, model.size_label());
-    let path = download_with_progress(&model, canceled, &downloaded)?;
+    let verified = AtomicU64::new(0);
+    println!("Checking {} ({})...", model.name, model.size_label());
+    let path = ensure_installed(&model, canceled, &verified, &AtomicU8::new(0))?;
     println!(
-        "Installed {} bytes at {}",
-        downloaded.load(Ordering::Relaxed),
+        "Verified {} bytes at {}",
+        verified.load(Ordering::Relaxed),
         path.display()
     );
     Ok(())

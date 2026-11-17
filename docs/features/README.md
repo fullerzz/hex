@@ -120,7 +120,7 @@ Install on Windows                        // setup.windows-installer
 │   ├── another version installed (e.g. self-updated) -> install this one over it
 │   ├── the setup engine is signed -> Smart App Control runs the copy extracted to %TEMP%
 │   │   (unsigned, it blocks setup: "Unable to execute file in the temporary directory", error 4551)
-│   └── finish -> Open Hex -> the first run downloads a model
+│   └── finish -> Open Hex -> the first run asks for your model file
 └── Settings › Apps -> uninstall every version, shortcut, Launch at login; keep data
     └── the installed uninstaller is that same signed engine
 
@@ -129,9 +129,9 @@ Install on Linux                          // setup.linux-installer
     ├── cannot start -> name the glibc floor or the missing Arch packages
     └── finish without wl-copy -> print apt/dnf/pacman commands for wl-clipboard and wtype
 
-Prepare local models                      // separate network dependency
-└── Dictation -> huggingface.co and its download CDN
-    └── Transfer fails -> host-specific guidance -> restore access -> Retry
+Prepare local models                      // no network: setup.supplied-only
+└── Dictation -> a GGUF file you supply (Choose your model file…, Add model
+    file…, `hex model import`); Hex never downloads models
 ```
 
 The website shows the pinned macOS version and platform requirements beside its

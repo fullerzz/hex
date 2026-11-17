@@ -1,8 +1,8 @@
-//! A model downloaded and loaded through a local API's
+//! A model checked and loaded through a local API's
 //! `POST /models/{id}/prepare`: the running Hex's or an owned embedded
-//! service's, with the download shown on a terminal's stderr.
+//! service's, with progress shown on a terminal's stderr. Hex never
+//! downloads models, so a missing file fails asking for one.
 
-use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::time::Duration;
 
 use super::progress;
@@ -14,42 +14,8 @@ use crate::transcription::models::{TranscriptionSelection, definition};
 const IDLE: Duration = Duration::from_secs(60);
 const MAX_EVENT: usize = 64 * 1024;
 
-/// Whether the person at the terminal agrees to download `selection`'s
-/// model. Asked once, on stderr, only when stdin and stderr are both a
-/// terminal and the reply isn't JSON; anything but Enter or yes declines.
-pub(super) fn consent(selection: &TranscriptionSelection, json: bool) -> bool {
-    if json || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-        return false;
-    }
-    let model = definition(selection.model);
-    progress::clear();
-    let mut stderr = std::io::stderr();
-    let _ = write!(
-        stderr,
-        "Download {} ({})? [Y/n] ",
-        model.name,
-        model.size_label()
-    );
-    let _ = stderr.flush();
-    let mut answer = String::new();
-    match std::io::stdin().lock().read_line(&mut answer) {
-        Ok(0) | Err(_) => {
-            let _ = writeln!(stderr);
-            false
-        }
-        Ok(_) => agrees(&answer),
-    }
-}
-
-fn agrees(answer: &str) -> bool {
-    matches!(
-        answer.trim().to_ascii_lowercase().as_str(),
-        "" | "y" | "yes"
-    )
-}
-
-/// Downloads, verifies, and loads `selection`'s model in `endpoint`'s
-/// service, until it reports `ok`. Nothing about the selected model changes.
+/// Checks and loads `selection`'s model, a file already on this computer, in
+/// `endpoint`'s service, until it reports `ok`. It never downloads. Nothing about the selected model changes.
 pub(super) fn prepare(
     endpoint: &Endpoint,
     selection: &TranscriptionSelection,
@@ -141,31 +107,10 @@ pub(super) fn prepare(
 fn failed(name: &str, code: &str) -> ControlReply {
     let what = match code {
         "download-failed" => "couldn't download",
-        "verification-failed" => "couldn't verify the download of",
+        "verification-failed" => "couldn't verify",
         "load-failed" => "couldn't load",
         "cancelled" => "stopped preparing",
         _ => "couldn't prepare",
     };
     ControlReply::error("failed", format!("Hex {what} {name}; try again"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn enter_or_yes_agrees_and_anything_else_declines() {
-        for answer in ["\n", "y\n", "Y\n", "yes\n", " YES \r\n"] {
-            assert!(agrees(answer), "{answer:?}");
-        }
-        for answer in ["n\n", "no\n", "nope\n", "q\n"] {
-            assert!(!agrees(answer), "{answer:?}");
-        }
-    }
-
-    #[test]
-    fn json_never_asks() {
-        let selection = TranscriptionSelection::default();
-        assert!(!consent(&selection, true));
-    }
 }

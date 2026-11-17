@@ -32,7 +32,7 @@ pub(super) struct PendingPreparation {
 }
 
 impl LinuxDesktopHost {
-    /// Downloads (manual) or verifies (a switch, or Enable) and loads a model
+    /// Verifies and loads a supplied model
     /// off the host thread. `automatic` is a keyboard switch, which a manual
     /// choice supersedes; a check is not automatic.
     pub(super) fn prepare_transcription(
@@ -123,29 +123,21 @@ impl LinuxDesktopHost {
         // A running listener keeps the current model until the new one is ready.
         let canceled = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(AtomicU64::new(0));
-        let stage = Arc::new(AtomicU8::new(if installed_only {
-            crate::transcription::models::ModelPreparationStage::Verifying as u8
-        } else {
-            crate::transcription::models::ModelPreparationStage::Downloading as u8
-        }));
+        let stage = Arc::new(AtomicU8::new(
+            crate::transcription::models::ModelPreparationStage::Verifying as u8,
+        ));
         let worker_canceled = canceled.clone();
         let worker_progress = progress.clone();
         let worker_stage = stage.clone();
         let tracked = selection.clone();
         let worker = std::thread::spawn(move || {
             (|| {
-                if installed_only {
-                    crate::transcription::models::ModelPreparationStage::Verifying
-                        .store(&worker_stage);
-                    crate::transcription::models::verify_installed(&definition, &worker_canceled)?;
-                } else {
-                    crate::transcription::models::download_with_stage_progress(
-                        &definition,
-                        &worker_canceled,
-                        &worker_progress,
-                        &worker_stage,
-                    )?;
-                }
+                crate::transcription::models::ensure_installed(
+                    &definition,
+                    &worker_canceled,
+                    &worker_progress,
+                    &worker_stage,
+                )?;
                 if worker_canceled.load(Ordering::Relaxed) {
                     return Err(color_eyre::eyre::eyre!("model activation canceled"));
                 }

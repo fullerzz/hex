@@ -1121,7 +1121,7 @@ fn stream_model_prepare(
         let model = model.clone();
         move |canceled, downloaded, stage| {
             if model.runtime.is_gguf() {
-                crate::transcription::models::download_with_stage_progress(
+                crate::transcription::models::ensure_installed(
                     &model,
                     &canceled,
                     &downloaded,

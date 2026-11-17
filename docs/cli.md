@@ -54,8 +54,8 @@ hex
 ├── model
 │   ├── list                       every model, its languages and size, installed or not
 │   ├── use <id> [--language L]    installed models only; never downloads or repairs
-│   ├── install [id] [--language L] download, then switch to it (default: the selected model)
-│   ├── cancel                     stop a download or load in progress
+│   ├── install [id] [--language L] check a file already here, then switch to it; never downloads
+│   ├── cancel                     stop a model check or load in progress
 │   ├── import <path> [--name N]   Labs: check and copy in a GGUF; prints its custom-… id
 │   ├── rename <id> <name>         Labs: an import's picker name
 │   ├── repair <id>                Labs: rehash Hex's copy; ready again if it still matches
@@ -192,11 +192,9 @@ on Hex's dictation engine when it already holds that model, so no second copy
 loads and dictation can run between pieces. With Hex stopped, the command
 starts its own `hex service --embedded` (the TypeScript SDK's direct child),
 uses it for every piece, and ends it on every exit; it never publishes it or
-starts a second service beside a running Hex. A model that isn't downloaded
-is offered once, `Download <model> (<size>)? [Y/n]`, only when stdin and
-stderr are terminals and `--json` is off; yes downloads, verifies, and loads
-it, then the piece is tried again. Otherwise the command answers
-`model-unavailable` and names `hex model install`.
+starts a second service beside a running Hex. A model that isn't on this
+computer answers `model-unavailable` and names `hex model import`: this fork
+never downloads models.
 
 The service skips silence (a piece the speech detector hears nothing in, once
 it is installed), and only a file with no speech at all answers `no-speech`
@@ -233,8 +231,11 @@ hex of its blob>` `(not tested by Hex)`, and `model use` with that id checks it
 in full and uses it where it is. `remove` on a found file only forgets it
 ([own models](features/own-models.md)).
 
-`model use` switches only to a downloaded model and checks it on disk; it never
-downloads or repairs one (`model install` does). It keeps that model's own
+`model use` switches only to an installed model and checks it on disk; it never
+downloads or repairs one, and neither does `model install`: this fork never
+downloads models. `model import --speech-detector <file>` installs the
+optional Silero VAD v6.2 speech detector from a file you supply, checked
+against its pinned SHA-256. It keeps that model's own
 remembered language, as the menu bar does; `--language`
 overrides only the language, and must be one the model supports.
 

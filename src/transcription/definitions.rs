@@ -114,13 +114,6 @@ pub struct GgufArtifact {
 }
 
 impl GgufArtifact {
-    pub(super) fn download_url(&self) -> String {
-        format!(
-            "https://huggingface.co/{}/resolve/{}/{}",
-            self.repository, self.revision, self.filename
-        )
-    }
-
     /// The name Hex's models folder holds this artifact under.
     pub fn local_name(&self) -> &str {
         self.stored_as.unwrap_or(&self.filename)

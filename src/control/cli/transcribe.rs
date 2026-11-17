@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{Output, embedded, prepare, print, progress};
+use super::{Output, embedded, print, progress};
 use crate::control::{ControlReply, model_selection};
 use crate::local_api::Endpoint;
 use crate::transcription::models::TranscriptionSelection;
@@ -40,18 +40,13 @@ pub(super) fn run(
     output: Output,
 ) -> u8 {
     embedded::exit_on_interrupt();
-    let reply = transcribe(&file, model, language, output.json);
+    let reply = transcribe(&file, model, language);
     embedded::done();
     progress::clear();
     print(reply, output)
 }
 
-fn transcribe(
-    file: &Path,
-    model: Option<String>,
-    language: Option<String>,
-    json: bool,
-) -> ControlReply {
+fn transcribe(file: &Path, model: Option<String>, language: Option<String>) -> ControlReply {
     let settings = match crate::app_settings::AppSettings::read() {
         Ok(settings) => settings,
         Err(error) => {
@@ -69,7 +64,7 @@ fn transcribe(
         Ok(endpoint) => endpoint,
         Err(message) => return ControlReply::error("unavailable", message),
     };
-    run_pieces(&endpoint, file, &mut pieces, &selection, json)
+    run_pieces(&endpoint, file, &mut pieces, &selection)
 }
 
 /// The file and the model, both checked before Hex is asked or a model is
@@ -149,14 +144,13 @@ fn minute_second(ms: u64) -> String {
 /// Each piece goes to the endpoint in turn with the model the request names.
 /// A piece of at most 30 s runs on the running Hex's dictation engine's
 /// loaded copy when it holds that model, so no second copy loads and
-/// dictation can run between pieces. A model that isn't downloaded is
-/// offered once at a terminal, then the same piece is sent again.
+/// dictation can run between pieces. A model that isn't on this computer is
+/// refused: Hex never downloads one.
 fn run_pieces(
     endpoint: &Endpoint,
     file: &Path,
     pieces: &mut Pieces,
     selection: &TranscriptionSelection,
-    json: bool,
 ) -> ControlReply {
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("model", selection.model.as_str())
@@ -170,7 +164,6 @@ fn run_pieces(
     let model = selection.model.as_str();
     let mut texts = Vec::new();
     let mut length = 0;
-    let mut prepared = false;
     loop {
         show_progress(&name, pieces);
         let samples = match pieces.next() {
@@ -183,30 +176,16 @@ fn run_pieces(
             Err(error) => return refused(file, error),
         };
         drop(samples);
-        let text = loop {
-            match endpoint.post(&path, "audio/wav", &wav, TIMEOUT, MAX_RESPONSE) {
-                Ok((200, body)) => match transcript(&body) {
-                    Ok(text) => break text,
-                    Err(reply) => return reply,
-                },
-                Ok((status, body)) => {
-                    let code = crate::local_api::error_code(status, &body);
-                    if code == "model-not-ready"
-                        && !prepared
-                        && !model.starts_with("custom-")
-                        && prepare::consent(selection, json)
-                    {
-                        prepared = true;
-                        if let Err(reply) = prepare::prepare(endpoint, selection) {
-                            return reply;
-                        }
-                        show_progress(&name, pieces);
-                        continue;
-                    }
-                    return refusal(status, &code, model);
-                }
-                Err(error) => return ControlReply::error("transport", format!("{error:#}")),
+        let text = match endpoint.post(&path, "audio/wav", &wav, TIMEOUT, MAX_RESPONSE) {
+            Ok((200, body)) => match transcript(&body) {
+                Ok(text) => text,
+                Err(reply) => return reply,
+            },
+            Ok((status, body)) => {
+                let code = crate::local_api::error_code(status, &body);
+                return refusal(status, &code, model);
             }
+            Err(error) => return ControlReply::error("transport", format!("{error:#}")),
         };
         // A piece that heard no speech adds nothing: only a file with
         // nothing to say answers no-speech.
@@ -321,7 +300,9 @@ fn not_ready(model: &str) -> String {
     if model.starts_with("custom-") {
         format!("`{model}` isn't ready; check it in Hex's model picker")
     } else {
-        format!("`{model}` isn't downloaded; run `hex model install {model}`")
+        format!(
+            "`{model}` isn't on this computer; Hex doesn't download models, so add its file with `hex model import`"
+        )
     }
 }
 
@@ -488,10 +469,7 @@ mod tests {
 
         let (code, message) = error(refusal(409, "model-not-ready", "parakeet_v2"));
         assert_eq!(code, "model-unavailable");
-        assert!(
-            message.contains("hex model install parakeet_v2"),
-            "{message}"
-        );
+        assert!(message.contains("hex model import"), "{message}");
 
         let (code, message) = error(refusal(409, "model-not-ready", "custom-ab12ab12ab12ab12"));
         assert_eq!(code, "model-unavailable");
