@@ -12,9 +12,22 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 # HEX_RELEASE_UNSIGNED=1 builds the release app (Hex, anomaly.hex) ad-hoc
 # signed: the Release workflow's build job, which holds no credentials. Its
 # sign-macos job signs it with the Developer ID (.github/release/sign-macos.sh).
+# HEX_LOCAL_SIGNING_IDENTITY=<name> signs the app (Hex, anomaly.hex) with a
+# self-signed code-signing identity from the keychain (`just signing-identity`).
+# Its designated requirement names that certificate, not the build, so macOS
+# keeps permission grants across rebuilds. No secure timestamp: nothing
+# notarizes it. The driver script's own signing asks for one, so it signs
+# ad-hoc there and `sign` below signs it with the identity.
+local_identity=
 if [ "${HEX_RELEASE_UNSIGNED:-}" = 1 ]; then
   team_id=
   identity=-
+  app_name=Hex
+  bundle_id=anomaly.hex
+elif [ -n "${HEX_LOCAL_SIGNING_IDENTITY:-}" ]; then
+  team_id=
+  identity=$HEX_LOCAL_SIGNING_IDENTITY
+  local_identity=1
   app_name=Hex
   bundle_id=anomaly.hex
 elif [ "${HEX_TEST_BUILD:-}" = 1 ]; then
@@ -45,6 +58,8 @@ executable="$bundle/Contents/MacOS/$executable_name"
 sign() {
   if [ "$identity" = - ]; then
     codesign --force --sign - "$@"
+  elif [ -n "$local_identity" ]; then
+    codesign --force --options runtime --sign "$identity" "$@"
   else
     codesign --force --timestamp --options runtime --sign "$identity" "$@"
   fi
@@ -77,7 +92,11 @@ cp "$root/target/release/hex" "$executable"
 cp "$root/target/release/scrawl-helper" "$bundle/Contents/MacOS/scrawl-helper"
 cp "$root/app/Info.plist" "$bundle/Contents/Info.plist"
 cp "$root/LICENSE" "$root/THIRD_PARTY_NOTICES.md" "$bundle/Contents/Resources/"
-HEX_VERSION="$version" HEX_BUILD_NUMBER="$build_number" HEX_TEAM_ID="$team_id" HEX_CODESIGN_IDENTITY="${identity#-}" HEX_SKIP_INSTALL_SCRIPT=1 \
+driver_identity=${identity#-}
+if [ -n "$local_identity" ]; then
+  driver_identity=
+fi
+HEX_VERSION="$version" HEX_BUILD_NUMBER="$build_number" HEX_TEAM_ID="$team_id" HEX_CODESIGN_IDENTITY="$driver_identity" HEX_SKIP_INSTALL_SCRIPT=1 \
   "$root/scripts/build-hex-microphone-driver.sh" "$bundle/Contents/Library" >&2
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$bundle/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$bundle/Contents/Info.plist"

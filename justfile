@@ -4,11 +4,13 @@
 # speech detector included, is one you supply (docs/features/own-models.md).
 # The model recipes below are for those files. Nothing here touches OpenCode.
 #
-# Builds are ad-hoc signed (HEX_RELEASE_UNSIGNED=1), because there is no
-# Developer ID in the keychain, and marked local (HEX_LOCAL_BUILD=1), so the
-# app never updates itself back to upstream's release. An ad-hoc signature
-# changes with every build, so macOS may drop the Accessibility grant after
-# each install: run `just reset-accessibility`, then grant it again.
+# Builds are signed with a self-signed identity in the login keychain
+# (`just signing-identity`, made on first build), because there is no
+# Developer ID here, and marked local (HEX_LOCAL_BUILD=1), so the app never
+# updates itself back to upstream's release. macOS ties permission grants to
+# that certificate, so they survive rebuilds. The first install after
+# switching signers, or after the identity is deleted or remade, needs them
+# granted once more: run `just reset-permissions`, then grant each again.
 
 set positional-arguments
 set shell := ["bash", "-euo", "pipefail", "-c"]
@@ -18,7 +20,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # Point HEX_BIN at target/app/Hex.app/Contents/MacOS/hex to use a fresh build.
 hex := env("HEX_BIN", "/Applications/Hex.app/Contents/MacOS/hex")
 upstream_url := "https://github.com/anomalyco/hex.git"
-build_env := "HEX_RELEASE_UNSIGNED=1 HEX_LOCAL_BUILD=1"
+signing_name := "Hex Local Signing"
+build_env := "HEX_LOCAL_SIGNING_IDENTITY='" + signing_name + "' HEX_LOCAL_BUILD=1"
 
 # List recipes.
 default:
@@ -27,20 +30,44 @@ default:
 # --- Build and install -------------------------------------------------------
 
 # Build target/app/Hex.app from this checkout.
-build:
+build: signing-identity
     {{ build_env }} scripts/build-app.sh
 
 # Build, stop the running Hex, replace /Applications/Hex.app, and open it.
-install:
+install: signing-identity
     {{ build_env }} scripts/install-app.sh
+
+# Make the self-signed code-signing identity in the login keychain, once.
+signing-identity:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name="{{ signing_name }}"
+    identities=$(security find-identity -p codesigning)
+    if grep -qF "\"$name\"" <<<"$identities"; then
+      exit 0
+    fi
+    dir=$(mktemp -d)
+    trap 'rm -rf "$dir"' EXIT
+    pass=$(/usr/bin/openssl rand -hex 16)
+    # LibreSSL's PKCS#12 defaults are ones `security import` reads.
+    /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+      -keyout "$dir/key.pem" -out "$dir/cert.pem" -subj "/CN=$name" \
+      -addext "basicConstraints=critical,CA:false" \
+      -addext "keyUsage=critical,digitalSignature" \
+      -addext "extendedKeyUsage=critical,codeSigning" 2>/dev/null
+    /usr/bin/openssl pkcs12 -export -name "$name" -passout "pass:$pass" \
+      -inkey "$dir/key.pem" -in "$dir/cert.pem" -out "$dir/identity.p12"
+    security import "$dir/identity.p12" -k "$HOME/Library/Keychains/login.keychain-db" \
+      -P "$pass" -T /usr/bin/codesign
+    echo "Created \"$name\" in the login keychain."
 
 # fmt, clippy, and tests (optionally only those matching a filter).
 check filter="":
     scripts/check {{ filter }}
 
-# Clear the stale Accessibility grant a reinstall leaves behind.
-reset-accessibility:
-    tccutil reset Accessibility anomaly.hex
+# Clear every permission grant tied to an earlier signer.
+reset-permissions:
+    tccutil reset All anomaly.hex
 
 # Ask the running Hex for its state.
 status:
