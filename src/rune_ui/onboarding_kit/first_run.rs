@@ -228,7 +228,40 @@ fn models_page(p: Paint, s: &Onboard, live: &Live) -> El {
             lead(p, tr("Hex found speech models already on this computer.")),
         ))
         .child(s.motion.staggered(list, 1.0, 8.0))
-        .child(action(continue_model_button(p)))
+        // A cache whose files all fail their check must never strand the
+        // first run: the person's own file is always a way forward.
+        .child(action(
+            row()
+                .key("model-actions")
+                .gap(10.0)
+                .center_y()
+                .child(
+                    Button::new(if live.using_file {
+                        tr("Adding model…")
+                    } else {
+                        tr("Choose your model file…")
+                    })
+                    .variant(ButtonVariant::Neutral)
+                    .on_press(live::use_file)
+                    .build_push(p.k)
+                    .key("use-file"),
+                )
+                .child(continue_model_button(p)),
+        ))
+        .children(
+            live.failed
+                .then(|| live.failure.clone())
+                .flatten()
+                .map(|why| {
+                    text(why)
+                        .key("why")
+                        .font(DESCRIPTION)
+                        .color(p.muted())
+                        .align(rune::Align::Center)
+                        .wrap()
+                        .w(TRY_W)
+                }),
+        )
 }
 
 fn model_row(p: Paint, index: usize, model: &ChoiceRow) -> El {

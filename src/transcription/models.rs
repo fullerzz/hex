@@ -757,8 +757,9 @@ pub fn speech_detector_installed() -> bool {
 }
 
 /// Copies the speech detector from a file the person chose into Hex's models
-/// folder, after checking it is the pinned Silero VAD file. The original is
-/// left as it is.
+/// folder, once the copy is checked as the pinned Silero VAD file. The copy
+/// itself is checked, not the original, so a file that changes mid-import is
+/// never installed. The original is left as it is.
 pub fn import_speech_detector(source: &Path, canceled: &AtomicBool) -> Result<PathBuf> {
     if !source.is_file() {
         bail!(
@@ -766,8 +767,13 @@ pub fn import_speech_detector(source: &Path, canceled: &AtomicBool) -> Result<Pa
             source.display()
         );
     }
-    verify_artifact(
-        source,
+    let directory = models_dir()?;
+    fs::create_dir_all(&directory)?;
+    let destination = directory.join(SPEECH_DETECTOR_ARTIFACT.local_name());
+    let copy = destination.with_extension("gguf.importing");
+    fs::copy(source, &copy)?;
+    let checked = verify_artifact(
+        &copy,
         &SPEECH_DETECTOR_ARTIFACT,
         SPEECH_DETECTOR_NAME,
         canceled,
@@ -775,13 +781,12 @@ pub fn import_speech_detector(source: &Path, canceled: &AtomicBool) -> Result<Pa
     .wrap_err(format!(
         "That isn't {} ({}). Choose another file.",
         SPEECH_DETECTOR_NAME, SPEECH_DETECTOR_ARTIFACT.filename
-    ))?;
-    let directory = models_dir()?;
-    fs::create_dir_all(&directory)?;
-    let destination = directory.join(SPEECH_DETECTOR_ARTIFACT.local_name());
-    let copy = destination.with_extension("gguf.importing");
-    fs::copy(source, &copy)?;
-    sync_file(&copy)?;
+    ))
+    .and_then(|()| Ok(sync_file(&copy)?));
+    if let Err(error) = checked {
+        let _ = fs::remove_file(&copy);
+        return Err(error);
+    }
     replace_file(&copy, &destination)?;
     sync_directory(&directory)?;
     write_artifact_receipt(&destination, &SPEECH_DETECTOR_ARTIFACT)?;
@@ -2013,6 +2018,14 @@ mod tests {
             import_speech_detector(&chosen, &AtomicBool::new(false)).unwrap_err()
         );
         assert!(error.contains("Choose another file"), "{error}");
+        assert!(
+            !models
+                .0
+                .join(SPEECH_DETECTOR_ARTIFACT.local_name())
+                .with_extension("gguf.importing")
+                .exists(),
+            "a rejected copy isn't left behind"
+        );
         let error = import_speech_detector(&models.0.join("absent"), &AtomicBool::new(false))
             .unwrap_err()
             .to_string();
