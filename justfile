@@ -17,8 +17,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # The installed app's CLI. `models`, `use`, `k-quant`, and `status` talk to the
 # running Hex; `import`, `import-detector`, and `remove` run on their own.
-# Point HEX_BIN at target/app/Hex.app/Contents/MacOS/hex to use a fresh build.
-hex := env("HEX_BIN", "/Applications/Hex.app/Contents/MacOS/hex")
+# Point HEX_BIN at target/app/Hex-Local.app/Contents/MacOS/hex to use a fresh build.
+hex := env("HEX_BIN", "/Applications/Hex-Local.app/Contents/MacOS/hex")
 upstream_url := "https://github.com/anomalyco/hex.git"
 signing_name := "Hex Local Signing"
 build_env := "HEX_LOCAL_SIGNING_IDENTITY='" + signing_name + "' HEX_LOCAL_BUILD=1"
@@ -29,11 +29,11 @@ default:
 
 # --- Build and install -------------------------------------------------------
 
-# Build target/app/Hex.app from this checkout.
+# Build target/app/Hex-Local.app from this checkout.
 build: signing-identity
     {{ build_env }} scripts/build-app.sh
 
-# Build, stop the running Hex, replace /Applications/Hex.app, and open it.
+# Build, stop the running Hex, replace /Applications/Hex-Local.app, and open it.
 install: signing-identity
     {{ build_env }} scripts/install-app.sh
 

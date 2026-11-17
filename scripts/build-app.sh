@@ -17,8 +17,11 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 # Its designated requirement names that certificate, not the build, so macOS
 # keeps permission grants across rebuilds. No secure timestamp: nothing
 # notarizes it. The driver script's own signing asks for one, so it signs
-# ad-hoc there and `sign` below signs it with the identity.
+# ad-hoc there and `sign` below signs it with the identity. Its bundle is
+# Hex-Local.app, so it never stands in for a released Hex.app; the app inside
+# is still named Hex.
 local_identity=
+bundle_name=
 if [ "${HEX_RELEASE_UNSIGNED:-}" = 1 ]; then
   team_id=
   identity=-
@@ -29,6 +32,7 @@ elif [ -n "${HEX_LOCAL_SIGNING_IDENTITY:-}" ]; then
   identity=$HEX_LOCAL_SIGNING_IDENTITY
   local_identity=1
   app_name=Hex
+  bundle_name=Hex-Local.app
   bundle_id=anomaly.hex
 elif [ "${HEX_TEST_BUILD:-}" = 1 ]; then
   team_id=
@@ -49,7 +53,7 @@ icon_output="$root/target/AppIcon.assets"
 icon_info="$root/target/AppIcon-info.plist"
 version=$(hex_version "$root")
 build_number=$(hex_build_number "$version")
-bundle_name="$app_name.app"
+bundle_name=${bundle_name:-"$app_name.app"}
 executable_name=hex
 
 bundle="$root/target/app/$bundle_name"
